@@ -1,0 +1,420 @@
+"use client";
+
+import { useCallback, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useAnalysis } from "@/lib/analysis-context";
+import type { AnalysisInputType, AnalysisContext, AnalysisSession } from "@/types";
+import { toast } from "sonner";
+import {
+  ImagePlus,
+  Video,
+  X,
+  Upload,
+  ArrowRight,
+  Loader2,
+  FileVideo,
+} from "lucide-react";
+
+const INPUT_TABS = [
+  { id: "video" as const, label: "Video", icon: Video },
+  { id: "screenshots" as const, label: "Screenshots", icon: ImagePlus },
+];
+
+const ACCEPTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
+const ACCEPTED_VIDEO_TYPES = ["video/mp4", "video/webm", "video/quicktime"];
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+const MAX_VIDEO_SIZE = 50 * 1024 * 1024;
+
+export default function AnalyzePage() {
+  const [inputType, setInputType] = useState<AnalysisInputType>("video");
+  const [screenshots, setScreenshots] = useState<
+    { file: File; preview: string }[]
+  >([]);
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [videoPreview, setVideoPreview] = useState<string | null>(null);
+  const [context, setContext] = useState<AnalysisContext>({});
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  const screenshotInputRef = useRef<HTMLInputElement>(null);
+  const videoInputRef = useRef<HTMLInputElement>(null);
+  const { setSession } = useAnalysis();
+  const router = useRouter();
+
+  const handleScreenshotUpload = useCallback(
+    (files: FileList | null) => {
+      if (!files) return;
+      const newScreenshots = [...screenshots];
+      for (const file of Array.from(files)) {
+        if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) {
+          toast.error(`${file.name}: Unsupported file type`);
+          continue;
+        }
+        if (file.size > MAX_IMAGE_SIZE) {
+          toast.error(`${file.name}: File too large (max 10MB)`);
+          continue;
+        }
+        if (newScreenshots.length >= 10) {
+          toast.error("Maximum 10 screenshots allowed");
+          break;
+        }
+        newScreenshots.push({ file, preview: URL.createObjectURL(file) });
+      }
+      setScreenshots(newScreenshots);
+    },
+    [screenshots]
+  );
+
+  const removeScreenshot = useCallback((index: number) => {
+    setScreenshots((prev) => {
+      const removed = prev[index];
+      URL.revokeObjectURL(removed.preview);
+      return prev.filter((_, i) => i !== index);
+    });
+  }, []);
+
+  const handleVideoUpload = useCallback((file: File | null) => {
+    if (!file) return;
+    if (!ACCEPTED_VIDEO_TYPES.includes(file.type)) {
+      toast.error("Unsupported video format. Use MP4, WebM, or MOV.");
+      return;
+    }
+    if (file.size > MAX_VIDEO_SIZE) {
+      toast.error("Video too large (max 50MB)");
+      return;
+    }
+    if (videoPreview) URL.revokeObjectURL(videoPreview);
+    setVideoFile(file);
+    setVideoPreview(URL.createObjectURL(file));
+  }, [videoPreview]);
+
+  const extractVideoFrames = useCallback(
+    async (video: File): Promise<string[]> => {
+      return new Promise((resolve, reject) => {
+        const videoEl = document.createElement("video");
+        videoEl.preload = "metadata";
+        videoEl.muted = true;
+
+        const url = URL.createObjectURL(video);
+        videoEl.src = url;
+
+        videoEl.onloadedmetadata = async () => {
+          const duration = videoEl.duration;
+          const canvas = document.createElement("canvas");
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            URL.revokeObjectURL(url);
+            reject(new Error("Failed to create canvas context"));
+            return;
+          }
+
+          canvas.width = videoEl.videoWidth;
+          canvas.height = videoEl.videoHeight;
+
+          const frameCount = Math.min(5, Math.max(1, Math.floor(duration / 2)));
+          const frames: string[] = [];
+
+          for (let i = 0; i < frameCount; i++) {
+            const time = (duration / (frameCount + 1)) * (i + 1);
+            videoEl.currentTime = time;
+            await new Promise<void>((res) => {
+              videoEl.onseeked = () => res();
+            });
+            ctx.drawImage(videoEl, 0, 0);
+            frames.push(canvas.toDataURL("image/jpeg", 0.8));
+          }
+
+          URL.revokeObjectURL(url);
+          resolve(frames);
+        };
+
+        videoEl.onerror = () => {
+          URL.revokeObjectURL(url);
+          reject(new Error("Failed to load video"));
+        };
+      });
+    },
+    []
+  );
+
+  const handleAnalyze = async () => {
+    if (inputType === "screenshots" && screenshots.length === 0) {
+      toast.error("Please upload at least one screenshot");
+      return;
+    }
+    if (inputType === "video" && !videoFile) {
+      toast.error("Please upload a video");
+      return;
+    }
+
+    setIsAnalyzing(true);
+
+    try {
+      let videoFrames: string[] | undefined;
+
+      if (inputType === "video" && videoFile) {
+        toast.info("Extracting video frames...");
+        try {
+          videoFrames = await extractVideoFrames(videoFile);
+        } catch {
+          toast.error("Failed to extract video frames");
+          setIsAnalyzing(false);
+          return;
+        }
+      }
+
+      const screenshotBase64 = screenshots.map((s) => s.preview);
+
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          inputType,
+          screenshots: inputType === "screenshots" ? screenshotBase64 : undefined,
+          videoFrames,
+          context,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Analysis failed");
+      }
+
+      const session: AnalysisSession = {
+        id: crypto.randomUUID(),
+        inputType,
+        screenshotCount: screenshots.length,
+        hasVideo: !!videoFile,
+        context,
+        result: data.result,
+        timestamp: new Date().toISOString(),
+      };
+
+      setSession(session);
+      toast.success("Analysis complete!");
+      router.push("/dashboard/results");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Analysis failed";
+      toast.error(message);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  return (
+    <div className="max-w-3xl mx-auto space-y-8">
+      <div>
+        <h1 className="text-2xl font-bold mb-1">New UX Analysis</h1>
+        <p className="text-muted-foreground text-sm">
+          Provide your design for AI-powered UX evaluation
+        </p>
+      </div>
+
+      {/* Input Type Tabs */}
+      <div className="flex gap-2 p-1 bg-muted rounded-xl">
+        {INPUT_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setInputType(tab.id)}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+              inputType === tab.id
+                ? "bg-white dark:bg-background shadow-sm text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <tab.icon className="w-4 h-4" />
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Video Input */}
+      {inputType === "video" && (
+        <div className="space-y-4">
+          <input
+            ref={videoInputRef}
+            type="file"
+            accept=".mp4,.webm,.mov"
+            onChange={(e) => handleVideoUpload(e.target.files?.[0] || null)}
+            className="hidden"
+          />
+
+          {!videoPreview ? (
+            <button
+              onClick={() => videoInputRef.current?.click()}
+              className="w-full p-8 rounded-2xl border-2 border-dashed border-border hover:border-accent/50 transition-colors text-center group"
+            >
+              <FileVideo className="w-8 h-8 text-muted-foreground group-hover:text-accent mx-auto mb-3 transition-colors" />
+              <p className="text-sm font-medium mb-1">
+                Click to upload a video
+              </p>
+              <p className="text-xs text-muted-foreground">
+                MP4, WebM, MOV — Max 50MB
+              </p>
+            </button>
+          ) : (
+            <div className="relative rounded-xl border border-border overflow-hidden">
+              <video
+                src={videoPreview}
+                controls
+                className="w-full max-h-80 object-contain bg-black"
+              />
+              <button
+                onClick={() => {
+                  if (videoPreview) URL.revokeObjectURL(videoPreview);
+                  setVideoFile(null);
+                  setVideoPreview(null);
+                }}
+                className="absolute top-3 right-3 w-8 h-8 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-black/80 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {videoFile && (
+            <p className="text-xs text-muted-foreground">
+              Note: Representative frames will be extracted from the video for
+              visual analysis. The entire video is not analyzed frame-by-frame.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Screenshots Input */}
+      {inputType === "screenshots" && (
+        <div className="space-y-4">
+          <input
+            ref={screenshotInputRef}
+            type="file"
+            accept=".png,.jpg,.jpeg,.webp"
+            multiple
+            onChange={(e) => handleScreenshotUpload(e.target.files)}
+            className="hidden"
+          />
+
+          <button
+            onClick={() => screenshotInputRef.current?.click()}
+            className="w-full p-8 rounded-2xl border-2 border-dashed border-border hover:border-accent/50 transition-colors text-center group"
+          >
+            <Upload className="w-8 h-8 text-muted-foreground group-hover:text-accent mx-auto mb-3 transition-colors" />
+            <p className="text-sm font-medium mb-1">
+              Click to upload screenshots
+            </p>
+            <p className="text-xs text-muted-foreground">
+              PNG, JPG, WEBP — Max 10MB each, up to 10 files
+            </p>
+          </button>
+
+          {screenshots.length > 0 && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {screenshots.map((s, i) => (
+                <div
+                  key={i}
+                  className="relative group rounded-xl border border-border overflow-hidden"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={s.preview}
+                    alt={`Screenshot ${i + 1}`}
+                    className="w-full aspect-video object-cover"
+                  />
+                  <button
+                    onClick={() => removeScreenshot(i)}
+                    className="absolute top-2 right-2 w-6 h-6 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Optional Context */}
+      <div className="space-y-4 pt-4 border-t border-border">
+        <h3 className="text-sm font-semibold">Optional Context</h3>
+
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium mb-1.5">
+              Project Name
+            </label>
+            <input
+              type="text"
+              value={context.projectName || ""}
+              onChange={(e) =>
+                setContext((p) => ({ ...p, projectName: e.target.value }))
+              }
+              placeholder="My Website Redesign"
+              className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-white dark:bg-muted focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-colors"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1.5">
+              Target Audience
+            </label>
+            <input
+              type="text"
+              value={context.targetAudience || ""}
+              onChange={(e) =>
+                setContext((p) => ({ ...p, targetAudience: e.target.value }))
+              }
+              placeholder="First-time college students"
+              className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-white dark:bg-muted focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-colors"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium mb-1.5">
+            Product Description
+          </label>
+          <textarea
+            value={context.productDescription || ""}
+            onChange={(e) =>
+              setContext((p) => ({ ...p, productDescription: e.target.value }))
+            }
+            placeholder="A project management tool for small teams..."
+            rows={2}
+            className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-white dark:bg-muted focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-colors resize-none"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium mb-1.5">UX Goals</label>
+          <textarea
+            value={context.uxGoals || ""}
+            onChange={(e) =>
+              setContext((p) => ({ ...p, uxGoals: e.target.value }))
+            }
+            placeholder="Evaluate ease of onboarding for new users..."
+            rows={2}
+            className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-white dark:bg-muted focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-colors resize-none"
+          />
+        </div>
+      </div>
+
+      {/* Analyze Button */}
+      <button
+        onClick={handleAnalyze}
+        disabled={isAnalyzing}
+        className="w-full py-3 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 flex items-center justify-center gap-2"
+      >
+        {isAnalyzing ? (
+          <>
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Analyzing...
+          </>
+        ) : (
+          <>
+            Analyze UX
+            <ArrowRight className="w-4 h-4" />
+          </>
+        )}
+      </button>
+    </div>
+  );
+}
