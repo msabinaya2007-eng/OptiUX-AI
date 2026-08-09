@@ -6,6 +6,8 @@ import { ScoreDisplay } from "@/components/results/score-display";
 import { IssuesList } from "@/components/results/issues-list";
 import { Recommendations } from "@/components/results/recommendations";
 import { PDFExport } from "@/components/results/pdf-export";
+import { PersonaSimulation } from "@/components/results/persona-simulation";
+import { UXReplay } from "@/components/results/ux-replay";
 import { ArrowLeft, PlusCircle } from "lucide-react";
 import Link from "next/link";
 
@@ -65,9 +67,15 @@ export default function ResultsPage() {
         <PDFExport />
       </div>
 
-      <ScoreDisplay />
-      <IssuesList />
-      <Recommendations />
+<ScoreDisplay />
+
+<UXReplay timeline={result.replayTimeline} />
+
+<IssuesList />
+
+<Recommendations />
+
+<PersonaSimulation />
 
       <div className="flex gap-3">
         <Link

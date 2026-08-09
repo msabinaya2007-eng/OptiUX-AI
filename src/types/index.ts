@@ -47,6 +47,15 @@ export interface UXAnalysisResult {
   strengths: string[];
   issues: UXIssue[];
   recommendations: UXRecommendation[];
+  replayTimeline?: ReplayTimelineItem[];
+}
+
+export interface ReplayTimelineItem {
+  timestamp: string;
+  event: string;
+  status: "success" | "friction" | "error" | "neutral";
+  observation: string;
+  severity?: "critical" | "high" | "medium" | "low";
 }
 
 export interface AnalysisSession {
@@ -76,4 +85,25 @@ export interface GeneratedCodeBlock {
 export interface ImprovedCodeResponse {
   blocks: GeneratedCodeBlock[];
   technology: string;
+}
+
+export type PersonaType =
+  | "first-time"
+  | "busy-professional"
+  | "low-tech"
+  | "accessibility";
+
+export interface PersonaSimulation {
+  persona: PersonaType;
+  personaName: string;
+  goal: string;
+  score: number;
+  summary: string;
+  journey: {
+    step: string;
+    status: "success" | "friction" | "error" | "neutral";
+    observation: string;
+  }[];
+  frictionPoints: string[];
+  improvements: string[];
 }

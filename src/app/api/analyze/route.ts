@@ -64,6 +64,21 @@ You MUST return valid JSON matching EXACTLY this structure:
       "recommendation": "Specific actionable recommendation to fix the issue."
     }
   ],
+  "replayTimeline": [
+  {
+    "timestamp": "00:12",
+    "event": "User opens the navigation menu",
+    "status": "success",
+    "observation": "Navigation options are clearly visible"
+  },
+  {
+    "timestamp": "00:24",
+    "event": "User attempts to continue",
+    "status": "friction",
+    "observation": "Primary action is difficult to identify",
+    "severity": "high"
+  }
+]
   "recommendations": [
     {
       "title": "Recommendation title",
@@ -160,6 +175,34 @@ Do NOT use Markdown.
 Do NOT wrap the JSON in code fences.
 
 Do NOT include explanations before or after the JSON.
+
+VIDEO REPLAY ANALYSIS:
+
+When the input type is video, analyze the frames as a chronological user journey.
+
+Create a replayTimeline array containing important moments in the interaction.
+
+For each moment:
+- Estimate the timestamp based on the frame position.
+- Describe what the user appears to be doing.
+- Mark the interaction as success, friction, error, or neutral.
+- Explain the UX observation.
+- Include severity when there is a UX problem.
+
+Look specifically for:
+- hesitation
+- repeated clicks
+- navigation confusion
+- unnecessary interactions
+- errors
+- unclear buttons
+- confusing layouts
+- unexpected states
+- successful task completion
+
+IMPORTANT:
+Only report interactions that can reasonably be inferred from the provided video frames.
+Do not invent user actions that cannot be observed.
 `;
 
 function buildUserPrompt(
