@@ -1,19 +1,23 @@
 import type { NextRequest } from "next/server";
 import { GoogleGenAI } from "@google/genai";
+import { chromium } from "playwright";
 import { validateAnalysisResult } from "@/lib/validation";
 import type {
   AnalysisRequest,
   UXAnalysisResult,
 } from "@/types";
 
+export const runtime = "nodejs";
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
+// Use the same Gemini model that is working for your UX analysis.
 const GEMINI_MODEL = "gemini-3.5-flash";
 
 const SYSTEM_PROMPT = `
 You are OptiUX-AI, an expert AI-powered UX and UI evaluator.
 
-Your job is to analyze screenshots or video frames provided by the user and produce a detailed, evidence-based UX evaluation.
+Your job is to analyze screenshots, website screenshots, or video frames provided by the user and produce a detailed, evidence-based UX evaluation.
 
 You specialize in:
 
@@ -65,20 +69,13 @@ You MUST return valid JSON matching EXACTLY this structure:
     }
   ],
   "replayTimeline": [
-  {
-    "timestamp": "00:12",
-    "event": "User opens the navigation menu",
-    "status": "success",
-    "observation": "Navigation options are clearly visible"
-  },
-  {
-    "timestamp": "00:24",
-    "event": "User attempts to continue",
-    "status": "friction",
-    "observation": "Primary action is difficult to identify",
-    "severity": "high"
-  }
-]
+    {
+      "timestamp": "00:12",
+      "event": "User opens the navigation menu",
+      "status": "success",
+      "observation": "Navigation options are clearly visible"
+    }
+  ],
   "recommendations": [
     {
       "title": "Recommendation title",
@@ -159,6 +156,7 @@ IMPORTANT:
 - Provide at least 3 recommendations when sufficient evidence exists.
 - For screenshots, evaluate the visible interface.
 - For video frames, evaluate the user flow across frames.
+- For website screenshots, evaluate the visible rendered website.
 - Compare multiple frames when possible.
 - Identify changes between frames.
 - Identify repeated UI patterns when relevant.
@@ -178,11 +176,12 @@ Do NOT include explanations before or after the JSON.
 
 VIDEO REPLAY ANALYSIS:
 
-When the input type is video, analyze the frames as a chronological user journey.
+ONLY when the input type is VIDEO, analyze the frames as a chronological user journey.
 
 Create a replayTimeline array containing important moments in the interaction.
 
 For each moment:
+
 - Estimate the timestamp based on the frame position.
 - Describe what the user appears to be doing.
 - Mark the interaction as success, friction, error, or neutral.
@@ -190,6 +189,7 @@ For each moment:
 - Include severity when there is a UX problem.
 
 Look specifically for:
+
 - hesitation
 - repeated clicks
 - navigation confusion
@@ -201,9 +201,20 @@ Look specifically for:
 - successful task completion
 
 IMPORTANT:
-Only report interactions that can reasonably be inferred from the provided video frames.
+
+For SCREENSHOTS and URL analysis:
+
+DO NOT generate replayTimeline.
+
+For URL analysis, the website is captured as a static screenshot, so there is no actual user journey to replay.
+
 Do not invent user actions that cannot be observed.
 `;
+
+
+/* =======================================================
+   BUILD USER PROMPT
+======================================================= */
 
 function buildUserPrompt(
   request: AnalysisRequest
@@ -244,9 +255,11 @@ function buildUserPrompt(
 
   parts.push("");
 
-  if (
-    request.inputType === "screenshots"
-  ) {
+  /* -------------------------------------------------------
+     SCREENSHOTS
+  ------------------------------------------------------- */
+
+  if (request.inputType === "screenshots") {
     parts.push(`
 INPUT TYPE: SCREENSHOTS
 
@@ -271,13 +284,22 @@ Evaluate:
 - Error prevention
 - User guidance
 
+IMPORTANT:
+
+This is a static screenshot analysis.
+
+DO NOT generate replayTimeline.
+
 Base every finding on visible evidence.
 `);
   }
 
-  if (
-    request.inputType === "video"
-  ) {
+
+  /* -------------------------------------------------------
+     VIDEO
+  ------------------------------------------------------- */
+
+  if (request.inputType === "video") {
     parts.push(`
 INPUT TYPE: VIDEO FRAMES
 
@@ -304,9 +326,75 @@ Compare the frames in sequence whenever possible.
 
 Pay attention to how the interface changes from one frame to another.
 
+Create the replayTimeline because this is a VIDEO analysis.
+
 Base every finding ONLY on the visible frames.
 `);
   }
+
+
+  /* -------------------------------------------------------
+     URL
+  ------------------------------------------------------- */
+
+  if (request.inputType === "url") {
+    parts.push(`
+INPUT TYPE: LIVE WEBSITE URL
+
+Website URL:
+
+${request.url}
+
+The application has opened this website using Playwright and captured its rendered interface as an image.
+
+Analyze the captured website interface as a real user-facing website.
+
+Evaluate:
+
+- Overall usability
+- Accessibility
+- Visual hierarchy
+- Navigation clarity
+- Typography
+- Color usage
+- Contrast
+- Spacing
+- Layout consistency
+- CTA visibility
+- Information architecture
+- Interaction cost
+- Cognitive load
+- User guidance
+- Visual consistency
+- Content organization
+- Error prevention
+- Trust and clarity
+
+Pay particular attention to:
+
+- Whether the primary purpose of the page is immediately understandable
+- Whether important actions are visually clear
+- Whether navigation is easy to understand
+- Whether content is organized logically
+- Whether the visual hierarchy guides the user naturally
+- Whether there are obvious accessibility concerns
+- Whether the interface feels cluttered or confusing
+- Whether spacing and alignment are consistent
+
+IMPORTANT:
+
+This is a static website screenshot analysis.
+
+DO NOT generate replayTimeline.
+
+Do not claim that an interaction works or fails unless it can be visually determined.
+
+Do not invent hidden functionality.
+
+Base every finding ONLY on what is visually observable in the captured website screenshot.
+`);
+  }
+
 
   parts.push(`
 The provided images are the primary source of evidence.
@@ -319,19 +407,12 @@ Return the complete UX analysis using the required JSON schema.
   return parts.join("\n");
 }
 
-function convertToGeminiPart(
-  image: string
-) {
-  /*
-   * Supports:
-   *
-   * data:image/png;base64,...
-   * data:image/jpeg;base64,...
-   * data:image/webp;base64,...
-   *
-   * Also supports raw base64 strings.
-   */
 
+/* =======================================================
+   CONVERT IMAGE TO GEMINI PART
+======================================================= */
+
+function convertToGeminiPart(image: string) {
   const match = image.match(
     /^data:(image\/[^;]+);base64,(.+)$/
   );
@@ -353,10 +434,63 @@ function convertToGeminiPart(
   };
 }
 
+
+/* =======================================================
+   CAPTURE WEBSITE WITH PLAYWRIGHT
+======================================================= */
+
+async function captureWebsite(
+  url: string
+): Promise<string> {
+  let browser;
+
+  try {
+    browser = await chromium.launch({
+      headless: true,
+    });
+
+    const page = await browser.newPage({
+      viewport: {
+        width: 1440,
+        height: 900,
+      },
+      deviceScaleFactor: 1,
+    });
+
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+
+    // Allow dynamic content, images and fonts to load.
+    await page.waitForTimeout(3000);
+
+    const screenshot =
+      await page.screenshot({
+        type: "jpeg",
+        quality: 85,
+        fullPage: false,
+      });
+
+    return screenshot.toString("base64");
+
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+  }
+}
+
+
+/* =======================================================
+   CALL GEMINI
+======================================================= */
+
 async function callGemini(
   prompt: string,
   images: string[]
 ): Promise<string> {
+
   if (!GEMINI_API_KEY) {
     throw new Error(
       "GEMINI_API_KEY is not configured."
@@ -366,12 +500,6 @@ async function callGemini(
   const ai = new GoogleGenAI({
     apiKey: GEMINI_API_KEY,
   });
-
-  /*
-   * Limit the number of images sent to Gemini.
-   *
-   * This prevents extremely large requests.
-   */
 
   const selectedImages =
     images.slice(0, 10);
@@ -388,11 +516,13 @@ async function callGemini(
       contents: [
         {
           role: "user",
+
           parts: [
             {
               text:
                 `${SYSTEM_PROMPT}\n\n${prompt}`,
             },
+
             ...imageParts,
           ],
         },
@@ -400,25 +530,24 @@ async function callGemini(
 
       config: {
         temperature: 0.3,
-
-        responseMimeType:
-          "application/json",
+        responseMimeType: "application/json",
       },
     });
 
   return response.text || "";
 }
 
+
+/* =======================================================
+   EXTRACT JSON
+======================================================= */
+
 function extractJSON(
   text: string
 ): unknown {
+
   let cleaned =
     text.trim();
-
-  /*
-   * Remove Markdown code fences
-   * if Gemini accidentally returns them.
-   */
 
   if (
     cleaned.startsWith(
@@ -435,6 +564,7 @@ function extractJSON(
         ""
       )
       .trim();
+
   } else if (
     cleaned.startsWith("```")
   ) {
@@ -450,23 +580,14 @@ function extractJSON(
       .trim();
   }
 
-  /*
-   * First try parsing the
-   * complete response.
-   */
-
   try {
     return JSON.parse(
       cleaned
     );
-  } catch {
-    // Continue with fallback.
-  }
 
-  /*
-   * Fallback:
-   * Find the JSON object.
-   */
+  } catch {
+    // Continue and try extracting JSON.
+  }
 
   const start =
     cleaned.indexOf("{");
@@ -495,13 +616,43 @@ function extractJSON(
   );
 }
 
+
+/* =======================================================
+   VALIDATE WEBSITE URL
+======================================================= */
+
+function validateWebsiteUrl(
+  value: string
+): boolean {
+
+  try {
+    const parsed =
+      new URL(value);
+
+    return (
+      parsed.protocol === "http:" ||
+      parsed.protocol === "https:"
+    );
+
+  } catch {
+    return false;
+  }
+}
+
+
+/* =======================================================
+   POST /api/analyze
+======================================================= */
+
 export async function POST(
   request: NextRequest
 ) {
+
   try {
-    /*
-     * 1. Check API key.
-     */
+
+    /* ---------------------------------------------------
+       1. CHECK GEMINI API KEY
+    --------------------------------------------------- */
 
     if (!GEMINI_API_KEY) {
       return Response.json(
@@ -515,16 +666,18 @@ export async function POST(
       );
     }
 
-    /*
-     * 2. Read request.
-     */
+
+    /* ---------------------------------------------------
+       2. READ REQUEST
+    --------------------------------------------------- */
 
     const body: AnalysisRequest =
       await request.json();
 
-    /*
-     * 3. Validate input type.
-     */
+
+    /* ---------------------------------------------------
+       3. VALIDATE INPUT TYPE
+    --------------------------------------------------- */
 
     if (!body.inputType) {
       return Response.json(
@@ -538,21 +691,16 @@ export async function POST(
       );
     }
 
-    /*
-     * 4. Only support screenshots
-     * and video.
-     */
 
     if (
-      body.inputType !==
-        "screenshots" &&
-      body.inputType !==
-        "video"
+      body.inputType !== "screenshots" &&
+      body.inputType !== "video" &&
+      body.inputType !== "url"
     ) {
       return Response.json(
         {
           error:
-            "OptiUX-AI currently supports screenshot and video analysis only.",
+            "Invalid analysis input type.",
         },
         {
           status: 400,
@@ -560,14 +708,15 @@ export async function POST(
       );
     }
 
-    /*
-     * 5. Validate screenshots.
-     */
+
+    /* ---------------------------------------------------
+       4. VALIDATE SCREENSHOTS
+    --------------------------------------------------- */
 
     if (
-      body.inputType ===
-      "screenshots"
+      body.inputType === "screenshots"
     ) {
+
       if (
         !body.screenshots ||
         body.screenshots.length === 0
@@ -584,14 +733,15 @@ export async function POST(
       }
     }
 
-    /*
-     * 6. Validate video frames.
-     */
+
+    /* ---------------------------------------------------
+       5. VALIDATE VIDEO
+    --------------------------------------------------- */
 
     if (
-      body.inputType ===
-      "video"
+      body.inputType === "video"
     ) {
+
       if (
         !body.videoFrames ||
         body.videoFrames.length === 0
@@ -608,40 +758,133 @@ export async function POST(
       }
     }
 
-    /*
-     * 7. Build AI prompt.
-     */
+
+    /* ---------------------------------------------------
+       6. VALIDATE URL
+    --------------------------------------------------- */
+
+    if (
+      body.inputType === "url"
+    ) {
+
+      if (!body.url) {
+        return Response.json(
+          {
+            error:
+              "Website URL is required.",
+          },
+          {
+            status: 400,
+          }
+        );
+      }
+
+      if (
+        !validateWebsiteUrl(
+          body.url
+        )
+      ) {
+        return Response.json(
+          {
+            error:
+              "Please provide a valid website URL starting with http:// or https://",
+          },
+          {
+            status: 400,
+          }
+        );
+      }
+    }
+
+
+    /* ---------------------------------------------------
+       7. BUILD USER PROMPT
+    --------------------------------------------------- */
 
     const userPrompt =
-      buildUserPrompt(body);
+      buildUserPrompt(
+        body
+      );
 
-    /*
-     * 8. Get images.
-     */
+
+    /* ---------------------------------------------------
+       8. PREPARE IMAGES
+    --------------------------------------------------- */
 
     let images: string[] = [];
 
+
+    /* SCREENSHOTS */
+
     if (
-      body.inputType ===
-        "screenshots" &&
+      body.inputType === "screenshots" &&
       body.screenshots
     ) {
       images =
         body.screenshots;
     }
 
+
+    /* VIDEO */
+
     if (
-      body.inputType ===
-        "video" &&
+      body.inputType === "video" &&
       body.videoFrames
     ) {
       images =
         body.videoFrames;
     }
 
-    /*
-     * 9. Call Gemini.
-     */
+
+    /* URL */
+
+    if (
+      body.inputType === "url"
+    ) {
+
+      try {
+
+        console.log(
+          "Capturing website:",
+          body.url
+        );
+
+        const websiteScreenshot =
+          await captureWebsite(
+            body.url!
+          );
+
+        images = [
+          websiteScreenshot,
+        ];
+
+        console.log(
+          "Website screenshot captured successfully."
+        );
+
+      } catch (error) {
+
+        console.error(
+          "Website capture failed:",
+          error
+        );
+
+        return Response.json(
+          {
+            error:
+              "Unable to open or capture the website. Make sure the URL is publicly accessible and try again.",
+          },
+          {
+            status: 502,
+          }
+        );
+      }
+    }
+
+
+    /* ---------------------------------------------------
+       9. CALL GEMINI
+    --------------------------------------------------- */
 
     const aiResponse =
       await callGemini(
@@ -649,18 +892,22 @@ export async function POST(
         images
       );
 
-    /*
-     * 10. Parse response.
-     */
+
+    /* ---------------------------------------------------
+       10. PARSE GEMINI RESPONSE
+    --------------------------------------------------- */
 
     let parsed: unknown;
 
     try {
+
       parsed =
         extractJSON(
           aiResponse
         );
-    } catch (error) {
+
+    } catch {
+
       console.error(
         "Gemini returned invalid JSON:",
         aiResponse
@@ -677,15 +924,17 @@ export async function POST(
       );
     }
 
-    /*
-     * 11. Validate result.
-     */
+
+    /* ---------------------------------------------------
+       11. VALIDATE ANALYSIS
+    --------------------------------------------------- */
 
     if (
       !validateAnalysisResult(
         parsed
       )
     ) {
+
       console.error(
         "Invalid analysis result:",
         parsed
@@ -702,18 +951,37 @@ export async function POST(
       );
     }
 
-    /*
-     * 12. Return validated result.
-     */
+
+    /* ---------------------------------------------------
+       12. CREATE RESULT
+    --------------------------------------------------- */
 
     const result:
       UXAnalysisResult =
       parsed;
 
+
+    /* ---------------------------------------------------
+       13. UX REPLAY ONLY FOR VIDEO
+    --------------------------------------------------- */
+
+    if (
+      body.inputType !== "video"
+    ) {
+      delete result.replayTimeline;
+    }
+
+
+    /* ---------------------------------------------------
+       14. RETURN RESULT
+    --------------------------------------------------- */
+
     return Response.json({
       result,
     });
+
   } catch (error) {
+
     console.error(
       "OptiUX-AI analysis error:",
       error
