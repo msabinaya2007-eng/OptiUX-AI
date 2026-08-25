@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   PlusCircle,
   FileText,
+  Clock,
   Settings,
   LogOut,
   Sparkles,
@@ -19,6 +20,7 @@ const sidebarLinks = [
   { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
   { label: "New Analysis", href: "/dashboard/analyze", icon: PlusCircle },
   { label: "Reports", href: "/dashboard/results", icon: FileText },
+  { label: "History", href: "/dashboard/history", icon: Clock },
   { label: "Settings", href: "/dashboard/settings", icon: Settings },
 ];
 

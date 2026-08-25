@@ -1,16 +1,40 @@
 "use client";
 
 import { useAuth } from "@/lib/auth-context";
-import { useAnalysis } from "@/lib/analysis-context";
 import { useRouter } from "next/navigation";
+import { useState, useEffect } from "react";
 import { BarChart3, AlertTriangle, TrendingUp, PlusCircle, ArrowRight } from "lucide-react";
+
+interface AnalysisSummary {
+  id: string;
+  inputType: string;
+  url: string | null;
+  projectName: string | null;
+  overallScore: number;
+  summary: string;
+  createdAt: string;
+  _count: { issues: number; strengths: number; recommendations: number };
+}
 
 export function DashboardContent() {
   const { user } = useAuth();
-  const { currentSession, totalAnalyses } = useAnalysis();
   const router = useRouter();
+  const [analyses, setAnalyses] = useState<AnalysisSummary[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const hasResult = currentSession?.result;
+  useEffect(() => {
+    fetch("/api/analyses")
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to fetch");
+        return res.json();
+      })
+      .then((data) => setAnalyses(data))
+      .catch(() => setAnalyses([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const totalAnalyses = analyses.length;
+  const latest = analyses.length > 0 ? analyses[0] : null;
 
   return (
     <div className="space-y-8">
@@ -31,7 +55,7 @@ export function DashboardContent() {
             </div>
             <span className="text-sm text-muted-foreground">Total Analyses</span>
           </div>
-          <span className="text-3xl font-bold">{totalAnalyses}</span>
+          <span className="text-3xl font-bold">{loading ? "—" : totalAnalyses}</span>
         </div>
 
         <div className="p-5 rounded-2xl border border-border bg-white dark:bg-muted/30">
@@ -42,7 +66,7 @@ export function DashboardContent() {
             <span className="text-sm text-muted-foreground">Last Score</span>
           </div>
           <span className="text-3xl font-bold">
-            {hasResult ? `${hasResult.overallScore}` : "—"}
+            {loading ? "—" : latest ? `${latest.overallScore}` : "—"}
           </span>
         </div>
 
@@ -54,19 +78,19 @@ export function DashboardContent() {
             <span className="text-sm text-muted-foreground">Issues Found</span>
           </div>
           <span className="text-3xl font-bold">
-            {hasResult ? hasResult.issues.length : "—"}
+            {loading ? "—" : latest ? latest._count.issues : "—"}
           </span>
         </div>
       </div>
 
-      {hasResult ? (
+      {!loading && latest ? (
         <div className="p-6 rounded-2xl border border-border bg-white dark:bg-muted/30">
           <h2 className="text-lg font-semibold mb-2">Latest Analysis</h2>
           <p className="text-sm text-muted-foreground mb-4">
-            {currentSession?.url || `${currentSession?.screenshotCount || 0} screenshot(s) uploaded`}
+            {latest.url || latest.projectName || `Analysis #${latest.id.slice(0, 8)}`}
           </p>
           <button
-            onClick={() => router.push("/dashboard/results")}
+            onClick={() => router.push(`/dashboard/history/${latest.id}`)}
             className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity"
           >
             View Results
@@ -74,23 +98,25 @@ export function DashboardContent() {
           </button>
         </div>
       ) : (
-        <div className="p-12 rounded-2xl border border-dashed border-border text-center">
-          <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mx-auto mb-4">
-            <PlusCircle className="w-8 h-8 text-muted-foreground" />
+        !loading && (
+          <div className="p-12 rounded-2xl border border-dashed border-border text-center">
+            <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mx-auto mb-4">
+              <PlusCircle className="w-8 h-8 text-muted-foreground" />
+            </div>
+            <h3 className="text-lg font-semibold mb-2">Your UX workspace is ready</h3>
+            <p className="text-sm text-muted-foreground mb-6 max-w-sm mx-auto">
+              Start your first AI-powered UX analysis. Upload screenshots, share a URL,
+              or provide a video to get detailed UX insights.
+            </p>
+            <button
+              onClick={() => router.push("/dashboard/analyze")}
+              className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity"
+            >
+              Start New Analysis
+              <ArrowRight className="w-4 h-4" />
+            </button>
           </div>
-          <h3 className="text-lg font-semibold mb-2">Your UX workspace is ready</h3>
-          <p className="text-sm text-muted-foreground mb-6 max-w-sm mx-auto">
-            Start your first AI-powered UX analysis. Upload screenshots, share a URL,
-            or provide a video to get detailed UX insights.
-          </p>
-          <button
-            onClick={() => router.push("/dashboard/analyze")}
-            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity"
-          >
-            Start New Analysis
-            <ArrowRight className="w-4 h-4" />
-          </button>
-        </div>
+        )
       )}
     </div>
   );

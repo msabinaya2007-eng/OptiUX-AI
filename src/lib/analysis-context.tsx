@@ -5,7 +5,6 @@ import type { AnalysisSession, UXAnalysisResult } from "@/types";
 
 interface AnalysisContextType {
   currentSession: AnalysisSession | null;
-  totalAnalyses: number;
   setSession: (session: AnalysisSession) => void;
   updateResult: (result: UXAnalysisResult) => void;
   clearSession: () => void;
@@ -15,28 +14,24 @@ interface AnalysisContextType {
 const AnalysisContext = createContext<AnalysisContextType | undefined>(undefined);
 
 const SESSION_KEY = "optiux-current-session";
-const COUNT_KEY = "optiux-total-analyses";
 
 interface StoreState {
   session: AnalysisSession | null;
-  totalAnalyses: number;
 }
 
 function getInitialState(): StoreState {
-  if (typeof window === "undefined") return { session: null, totalAnalyses: 0 };
+  if (typeof window === "undefined") return { session: null };
   try {
     const session = localStorage.getItem(SESSION_KEY);
-    const count = localStorage.getItem(COUNT_KEY);
     return {
       session: session ? JSON.parse(session) : null,
-      totalAnalyses: count ? parseInt(count, 10) : 0,
     };
   } catch {
-    return { session: null, totalAnalyses: 0 };
+    return { session: null };
   }
 }
 
-const SERVER_SNAPSHOT: StoreState = { session: null, totalAnalyses: 0 };
+const SERVER_SNAPSHOT: StoreState = { session: null };
 
 let currentState = getInitialState();
 let listeners: Array<() => void> = [];
@@ -65,10 +60,8 @@ export function AnalysisProvider({ children }: { children: React.ReactNode }) {
   const state = useSyncExternalStore(subscribe, getSnapshot, () => SERVER_SNAPSHOT);
 
   const setSession = useCallback((session: AnalysisSession) => {
-    const newCount = currentState.totalAnalyses + 1;
     localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-    localStorage.setItem(COUNT_KEY, String(newCount));
-    updateStore({ session, totalAnalyses: newCount });
+    updateStore({ session });
   }, []);
 
   const updateResult = useCallback((result: UXAnalysisResult) => {
@@ -86,15 +79,13 @@ export function AnalysisProvider({ children }: { children: React.ReactNode }) {
 
   const clearAll = useCallback(() => {
     localStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(COUNT_KEY);
-    updateStore({ session: null, totalAnalyses: 0 });
+    updateStore({ session: null });
   }, []);
 
   return (
     <AnalysisContext.Provider
       value={{
         currentSession: state.session,
-        totalAnalyses: state.totalAnalyses,
         setSession,
         updateResult,
         clearSession,

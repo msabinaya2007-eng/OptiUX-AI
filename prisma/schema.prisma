@@ -1,0 +1,94 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Analysis {
+  id                String   @id @default(cuid())
+  inputType         String
+  url               String?
+  projectName       String?
+  targetAudience    String?
+  productDescription String?
+  uxGoals           String?
+  overallScore      Int
+  summary           String
+  rawJson           Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  categories        CategoryScore?
+  strengths         Strength[]
+  issues            Issue[]
+  recommendations   Recommendation[]
+  replayTimeline    ReplayEvent[]
+
+  @@index([createdAt(sort: Desc)])
+}
+
+model CategoryScore {
+  id                String  @id @default(cuid())
+  analysisId        String  @unique
+  accessibility     Int
+  usability         Int
+  visualHierarchy   Int
+  interactionCost   Int
+  cognitiveLoad     Int
+
+  analysis          Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+}
+
+model Strength {
+  id         String @id @default(cuid())
+  analysisId String
+  text       String
+
+  analysis   Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@index([analysisId])
+}
+
+model Issue {
+  id             String @id @default(cuid())
+  analysisId     String
+  title          String
+  category       String
+  severity       String
+  description    String
+  evidence       String
+  recommendation String
+
+  analysis       Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@index([analysisId])
+}
+
+model Recommendation {
+  id          String @id @default(cuid())
+  analysisId  String
+  title       String
+  impact      String
+  description String
+
+  analysis    Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@index([analysisId])
+}
+
+model ReplayEvent {
+  id          String  @id @default(cuid())
+  analysisId  String
+  timestamp   String
+  event       String
+  status      String
+  observation String
+  severity    String?
+
+  analysis    Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@index([analysisId])
+}

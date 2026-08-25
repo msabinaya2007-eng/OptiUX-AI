@@ -1,50 +1,72 @@
 import type { NextRequest } from "next/server";
-import { GoogleGenAI } from "@google/genai";
-import { chromium } from "playwright";
+
+import {
+  dataUrlToGeminiPart,
+  describeImageData,
+  formatQuotaError,
+  generateGeminiContent,
+  isValidImageDataUrl,
+  type GeminiImagePart,
+} from "@/lib/ai/gemini";
+
+import { captureWebsite } from "@/lib/capture/website";
+
+import { saveAnalysis } from "@/lib/analyse/store";
+
 import { validateAnalysisResult } from "@/lib/validation";
+
 import type {
   AnalysisRequest,
   UXAnalysisResult,
 } from "@/types";
 
-export const runtime = "nodejs";
+const MAX_VIDEO_FRAMES = 10;
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+type CaptureResult = {
+  screenshot: string;
+  title: string;
+  description: string;
+  url: string;
+};
 
-// Use the same Gemini model that is working for your UX analysis.
-const GEMINI_MODEL = "gemini-3.5-flash";
+/* =========================================================
+   SYSTEM PROMPT
+========================================================= */
 
 const SYSTEM_PROMPT = `
-You are OptiUX-AI, an expert AI-powered UX and UI evaluator.
+You are OptiUX-AI, an expert AI-powered UX evaluation system.
 
-Your job is to analyze screenshots, website screenshots, or video frames provided by the user and produce a detailed, evidence-based UX evaluation.
+Your task is to analyze websites, applications, screenshots,
+and recorded user interactions from a UX perspective.
 
-You specialize in:
+Evaluate the interface across these five categories:
 
-- User Experience Design
-- User Interface Design
-- Accessibility
-- Usability
-- Visual Hierarchy
-- Interaction Design
-- Cognitive Load
-- Human-Computer Interaction
+1. accessibility
+2. usability
+3. visualHierarchy
+4. interactionCost
+5. cognitiveLoad
+
+Your analysis must be practical, specific, and actionable.
 
 IMPORTANT:
 
-Analyze ONLY what is visually observable in the provided images.
+- Do not invent UI elements that are not visible.
+- Base observations on the provided visual evidence.
+- Give clear evidence for every identified issue.
+- Prioritize issues by severity.
+- Recommendations must directly address the identified problems.
+- Scores must be between 0 and 100.
+- Higher scores mean better UX.
+- Be concise but useful.
 
-Do not invent UI elements that are not visible.
+Return ONLY valid JSON.
 
-Do not assume functionality that cannot be observed.
-
-Do not claim that something exists unless it is visible in the provided input.
-
-You MUST return valid JSON matching EXACTLY this structure:
+The JSON must follow this structure:
 
 {
   "overallScore": 0,
-  "summary": "Short summary of the overall UX quality.",
+  "summary": "",
   "categories": {
     "accessibility": 0,
     "usability": 0,
@@ -52,638 +74,356 @@ You MUST return valid JSON matching EXACTLY this structure:
     "interactionCost": 0,
     "cognitiveLoad": 0
   },
-  "strengths": [
-    "Strength 1",
-    "Strength 2",
-    "Strength 3"
-  ],
+  "strengths": [],
   "issues": [
     {
-      "id": "issue-1",
-      "title": "Short issue title",
-      "category": "Accessibility",
+      "id": "",
+      "title": "",
+      "category": "",
       "severity": "critical",
-      "description": "Detailed explanation of the UX issue.",
-      "evidence": "Specific visual evidence observed in the provided image.",
-      "recommendation": "Specific actionable recommendation to fix the issue."
-    }
-  ],
-  "replayTimeline": [
-    {
-      "timestamp": "00:12",
-      "event": "User opens the navigation menu",
-      "status": "success",
-      "observation": "Navigation options are clearly visible"
+      "description": "",
+      "evidence": "",
+      "recommendation": ""
     }
   ],
   "recommendations": [
     {
-      "title": "Recommendation title",
+      "title": "",
       "impact": "High",
-      "description": "Detailed explanation of the recommended UX improvement."
+      "description": ""
     }
   ]
 }
 
-SCORING:
+For video analysis, you may additionally provide:
 
-All scores must be numbers between 0 and 100.
+"replayTimeline": [
+  {
+    "timestamp": "",
+    "event": "",
+    "status": "success",
+    "observation": "",
+    "severity": "low"
+  }
+]
 
-Higher scores mean better UX.
+Possible severity values:
 
-90-100 = Excellent
-75-89 = Good
-60-74 = Needs Improvement
-40-59 = Poor
-0-39 = Critical Problems
+critical, high, medium, low.
 
-Evaluate these five categories:
+Possible timeline status values:
 
-1. Accessibility
-2. Usability
-3. Visual Hierarchy
-4. Interaction Cost
-5. Cognitive Load
+success, friction, error, neutral.
 
-ISSUE RULES:
-
-Identify real UX problems visible in the provided input.
-
-Each issue must include:
-
-- Unique ID
-- Clear title
-- Valid category
-- Severity
-- Detailed description
-- Visual evidence
-- Practical recommendation
-
-Allowed categories:
-
-- Accessibility
-- Usability
-- Visual Hierarchy
-- Interaction Cost
-- Cognitive Load
-
-Allowed severity values:
-
-- critical
-- high
-- medium
-- low
-
-RECOMMENDATION RULES:
-
-Provide practical recommendations that directly address observed UX issues.
-
-Allowed impact values:
-
-- High
-- Medium
-- Low
-
-IMPORTANT:
-
-- Base findings ONLY on visible evidence.
-- Do not invent information.
-- Do not give uniformly high scores.
-- Do not give uniformly low scores.
-- Be honest and critical.
-- Mention both strengths and weaknesses.
-- Provide at least 3 issues when sufficient evidence exists.
-- Provide at least 3 recommendations when sufficient evidence exists.
-- For screenshots, evaluate the visible interface.
-- For video frames, evaluate the user flow across frames.
-- For website screenshots, evaluate the visible rendered website.
-- Compare multiple frames when possible.
-- Identify changes between frames.
-- Identify repeated UI patterns when relevant.
-- Consider accessibility issues that can be visually evaluated.
-- Consider mobile responsiveness only if mobile screens are provided.
-- Consider desktop responsiveness only if desktop screens are provided.
-
-MOST IMPORTANT:
-
-Return ONLY the JSON object.
-
-Do NOT use Markdown.
-
-Do NOT wrap the JSON in code fences.
-
-Do NOT include explanations before or after the JSON.
-
-VIDEO REPLAY ANALYSIS:
-
-ONLY when the input type is VIDEO, analyze the frames as a chronological user journey.
-
-Create a replayTimeline array containing important moments in the interaction.
-
-For each moment:
-
-- Estimate the timestamp based on the frame position.
-- Describe what the user appears to be doing.
-- Mark the interaction as success, friction, error, or neutral.
-- Explain the UX observation.
-- Include severity when there is a UX problem.
-
-Look specifically for:
-
-- hesitation
-- repeated clicks
-- navigation confusion
-- unnecessary interactions
-- errors
-- unclear buttons
-- confusing layouts
-- unexpected states
-- successful task completion
-
-IMPORTANT:
-
-For SCREENSHOTS and URL analysis:
-
-DO NOT generate replayTimeline.
-
-For URL analysis, the website is captured as a static screenshot, so there is no actual user journey to replay.
-
-Do not invent user actions that cannot be observed.
+Do not include replayTimeline for screenshots or URLs unless
+the request explicitly provides meaningful interaction evidence.
 `;
 
-
-/* =======================================================
-   BUILD USER PROMPT
-======================================================= */
-
-function buildUserPrompt(
-  request: AnalysisRequest
-): string {
-  const parts: string[] = [];
-
-  parts.push(
-    "You are performing a UX analysis for OptiUX-AI."
-  );
-
-  if (request.context) {
-    const context = request.context;
-
-    if (context.projectName) {
-      parts.push(
-        `Project Name: ${context.projectName}`
-      );
-    }
-
-    if (context.targetAudience) {
-      parts.push(
-        `Target Audience: ${context.targetAudience}`
-      );
-    }
-
-    if (context.productDescription) {
-      parts.push(
-        `Product Description: ${context.productDescription}`
-      );
-    }
-
-    if (context.uxGoals) {
-      parts.push(
-        `UX Goals: ${context.uxGoals}`
-      );
-    }
-  }
-
-  parts.push("");
-
-  /* -------------------------------------------------------
-     SCREENSHOTS
-  ------------------------------------------------------- */
-
-  if (request.inputType === "screenshots") {
-    parts.push(`
-INPUT TYPE: SCREENSHOTS
-
-Analyze the provided screenshot(s).
-
-Evaluate:
-
-- Layout
-- Navigation
-- Typography
-- Color usage
-- Contrast
-- Spacing
-- Visual hierarchy
-- CTA prominence
-- Information architecture
-- Accessibility
-- Usability
-- Cognitive load
-- Interaction cost
-- Consistency
-- Error prevention
-- User guidance
-
-IMPORTANT:
-
-This is a static screenshot analysis.
-
-DO NOT generate replayTimeline.
-
-Base every finding on visible evidence.
-`);
-  }
-
-
-  /* -------------------------------------------------------
-     VIDEO
-  ------------------------------------------------------- */
-
-  if (request.inputType === "video") {
-    parts.push(`
-INPUT TYPE: VIDEO FRAMES
-
-The provided images are representative frames extracted from a user interaction video.
-
-Analyze them as a sequence.
-
-Evaluate:
-
-- Navigation flow
-- Interaction patterns
-- Visual feedback
-- State changes
-- CTA visibility
-- User guidance
-- Number of interaction steps
-- Interaction cost
-- Cognitive load
-- Consistency between screens
-- Transitions between screens
-- Potential usability problems
-
-Compare the frames in sequence whenever possible.
-
-Pay attention to how the interface changes from one frame to another.
-
-Create the replayTimeline because this is a VIDEO analysis.
-
-Base every finding ONLY on the visible frames.
-`);
-  }
-
-
-  /* -------------------------------------------------------
-     URL
-  ------------------------------------------------------- */
-
-  if (request.inputType === "url") {
-    parts.push(`
-INPUT TYPE: LIVE WEBSITE URL
-
-Website URL:
-
-${request.url}
-
-The application has opened this website using Playwright and captured its rendered interface as an image.
-
-Analyze the captured website interface as a real user-facing website.
-
-Evaluate:
-
-- Overall usability
-- Accessibility
-- Visual hierarchy
-- Navigation clarity
-- Typography
-- Color usage
-- Contrast
-- Spacing
-- Layout consistency
-- CTA visibility
-- Information architecture
-- Interaction cost
-- Cognitive load
-- User guidance
-- Visual consistency
-- Content organization
-- Error prevention
-- Trust and clarity
-
-Pay particular attention to:
-
-- Whether the primary purpose of the page is immediately understandable
-- Whether important actions are visually clear
-- Whether navigation is easy to understand
-- Whether content is organized logically
-- Whether the visual hierarchy guides the user naturally
-- Whether there are obvious accessibility concerns
-- Whether the interface feels cluttered or confusing
-- Whether spacing and alignment are consistent
-
-IMPORTANT:
-
-This is a static website screenshot analysis.
-
-DO NOT generate replayTimeline.
-
-Do not claim that an interaction works or fails unless it can be visually determined.
-
-Do not invent hidden functionality.
-
-Base every finding ONLY on what is visually observable in the captured website screenshot.
-`);
-  }
-
-
-  parts.push(`
-The provided images are the primary source of evidence.
-
-Do not assume functionality that cannot be observed.
-
-Return the complete UX analysis using the required JSON schema.
-`);
-
-  return parts.join("\n");
-}
-
-
-/* =======================================================
-   CONVERT IMAGE TO GEMINI PART
-======================================================= */
-
-function convertToGeminiPart(image: string) {
-  const match = image.match(
-    /^data:(image\/[^;]+);base64,(.+)$/
-  );
-
-  if (match) {
-    return {
-      inlineData: {
-        mimeType: match[1],
-        data: match[2],
-      },
-    };
-  }
-
-  return {
-    inlineData: {
-      mimeType: "image/jpeg",
-      data: image,
-    },
-  };
-}
-
-
-/* =======================================================
-   CAPTURE WEBSITE WITH PLAYWRIGHT
-======================================================= */
-
-async function captureWebsite(
-  url: string
-): Promise<string> {
-  let browser;
-
-  try {
-    browser = await chromium.launch({
-      headless: true,
-    });
-
-    const page = await browser.newPage({
-      viewport: {
-        width: 1440,
-        height: 900,
-      },
-      deviceScaleFactor: 1,
-    });
-
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
-    });
-
-    // Allow dynamic content, images and fonts to load.
-    await page.waitForTimeout(3000);
-
-    const screenshot =
-      await page.screenshot({
-        type: "jpeg",
-        quality: 85,
-        fullPage: false,
-      });
-
-    return screenshot.toString("base64");
-
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
-  }
-}
-
-
-/* =======================================================
-   CALL GEMINI
-======================================================= */
-
-async function callGemini(
-  prompt: string,
-  images: string[]
-): Promise<string> {
-
-  if (!GEMINI_API_KEY) {
-    throw new Error(
-      "GEMINI_API_KEY is not configured."
+/* =========================================================
+   CONVERT BASE64 IMAGES → GEMINI IMAGE PARTS
+========================================================= */
+
+/*
+ * All images (URL captures, uploaded screenshots,
+ * video frames) must arrive as base64 data URLs:
+ *
+ *   data:image/png;base64,AAAA...
+ *   data:image/jpeg;base64,AAAA...
+ *   data:image/webp;base64,AAAA...
+ *
+ * Validation and conversion are handled by
+ * dataUrlToGeminiPart() in src/lib/ai/gemini.ts.
+ * Here we only add context about WHICH input failed,
+ * using safe metadata only (never the full base64).
+ */
+
+type ImageSourceKind =
+  | "website capture"
+  | "screenshot"
+  | "video frame";
+
+function convertImagesToGeminiParts(
+  images: string[],
+  source: ImageSourceKind
+): GeminiImagePart[] {
+  return images.map((image, index) => {
+    console.log(
+      `[OptiUX] ${source} ${index + 1}/${images.length} metadata:`,
+      describeImageData(image)
     );
-  }
 
-  const ai = new GoogleGenAI({
-    apiKey: GEMINI_API_KEY,
+    if (
+      !isValidImageDataUrl(
+        image
+      )
+    ) {
+      const metadata =
+        describeImageData(image);
+
+      let detail = "";
+
+      if (metadata.isBlobUrl) {
+        detail =
+          " A browser blob URL was received instead of image bytes. The client must convert files to base64 data URLs before uploading.";
+      } else if (!metadata.isDataUrl) {
+        detail =
+          " The value received is not a data:image/...;base64,... URL.";
+      }
+
+      throw new Error(
+        `Invalid ${source} data received by the server (${source} ${index + 1} of ${images.length}). Expected a base64 image data URL.${detail}`
+      );
+    }
+
+    try {
+      return dataUrlToGeminiPart(
+        image
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unknown conversion error.";
+
+      throw new Error(
+        `Invalid ${source} data received by the server (${source} ${index + 1} of ${images.length}). Expected a base64 image data URL. ${message}`
+      );
+    }
   });
-
-  const selectedImages =
-    images.slice(0, 10);
-
-  const imageParts =
-    selectedImages.map(
-      convertToGeminiPart
-    );
-
-  const response =
-    await ai.models.generateContent({
-      model: GEMINI_MODEL,
-
-      contents: [
-        {
-          role: "user",
-
-          parts: [
-            {
-              text:
-                `${SYSTEM_PROMPT}\n\n${prompt}`,
-            },
-
-            ...imageParts,
-          ],
-        },
-      ],
-
-      config: {
-        temperature: 0.3,
-        responseMimeType: "application/json",
-      },
-    });
-
-  return response.text || "";
 }
 
+/* =========================================================
+   EXTRACT JSON FROM GEMINI RESPONSE
+========================================================= */
 
-/* =======================================================
-   EXTRACT JSON
-======================================================= */
+function extractJson(text: string): unknown {
+  let cleaned = text.trim();
 
-function extractJSON(
-  text: string
-): unknown {
+  // Remove markdown JSON fences if Gemini adds them.
+  cleaned = cleaned
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
 
-  let cleaned =
-    text.trim();
-
-  if (
-    cleaned.startsWith(
-      "```json"
-    )
-  ) {
-    cleaned = cleaned
-      .replace(
-        /^```json/,
-        ""
-      )
-      .replace(
-        /```$/,
-        ""
-      )
-      .trim();
-
-  } else if (
-    cleaned.startsWith("```")
-  ) {
-    cleaned = cleaned
-      .replace(
-        /^```/,
-        ""
-      )
-      .replace(
-        /```$/,
-        ""
-      )
-      .trim();
-  }
-
+  // First attempt: parse the complete response.
   try {
-    return JSON.parse(
-      cleaned
-    );
-
+    return JSON.parse(cleaned);
   } catch {
-    // Continue and try extracting JSON.
+    // Continue with fallback extraction.
   }
 
-  const start =
-    cleaned.indexOf("{");
-
-  const end =
-    cleaned.lastIndexOf("}");
+  // Fallback: find the outermost JSON object.
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
 
   if (
     start !== -1 &&
     end !== -1 &&
     end > start
   ) {
-    const jsonString =
-      cleaned.slice(
-        start,
-        end + 1
-      );
-
-    return JSON.parse(
-      jsonString
+    const possibleJson = cleaned.slice(
+      start,
+      end + 1
     );
+
+    return JSON.parse(possibleJson);
   }
 
   throw new Error(
-    "Gemini did not return valid JSON."
+    "Gemini returned invalid JSON."
   );
 }
 
+/* =========================================================
+   BUILD ANALYSIS PROMPT
+========================================================= */
 
-/* =======================================================
-   VALIDATE WEBSITE URL
-======================================================= */
+function buildAnalysisPrompt(
+  body: AnalysisRequest,
+  images: string[],
+  websiteInfo?: CaptureResult
+): string {
+  const context = body.context || {};
 
-function validateWebsiteUrl(
-  value: string
-): boolean {
+  const contextText = `
+Project name:
+${context.projectName || "Not provided"}
 
-  try {
-    const parsed =
-      new URL(value);
+Target audience:
+${context.targetAudience || "Not provided"}
 
-    return (
-      parsed.protocol === "http:" ||
-      parsed.protocol === "https:"
-    );
+Product description:
+${context.productDescription || "Not provided"}
 
-  } catch {
-    return false;
+UX goals:
+${context.uxGoals || "Not provided"}
+`;
+
+  let evidenceText = "";
+
+  /* -------------------------------------------------------
+     URL INPUT
+  ------------------------------------------------------- */
+
+  if (
+    body.inputType === "url" &&
+    body.url
+  ) {
+    evidenceText = `
+Input type: Website URL
+
+Website URL:
+${websiteInfo?.url || body.url}
+
+Website title:
+${websiteInfo?.title || "Unknown"}
+
+Website description:
+${websiteInfo?.description || "Unknown"}
+
+The attached image is a screenshot captured from
+the supplied website URL.
+
+Analyze the actual visible interface in the screenshot.
+
+Pay particular attention to:
+
+- visual hierarchy
+- navigation
+- layout
+- spacing
+- typography
+- color contrast
+- accessibility indicators
+- calls to action
+- content organization
+- usability
+- interaction cost
+- cognitive load
+
+Do not assume functionality that cannot be observed.
+`;
   }
+
+  /* -------------------------------------------------------
+     SCREENSHOT INPUT
+  ------------------------------------------------------- */
+
+  if (
+    body.inputType === "screenshots"
+  ) {
+    evidenceText = `
+Input type: UI screenshots
+
+The attached images are screenshots provided by the user.
+
+Analyze the visible interface carefully.
+
+Focus on:
+
+- layout
+- spacing
+- typography
+- colors
+- contrast
+- hierarchy
+- navigation
+- buttons
+- forms
+- accessibility
+- usability
+- cognitive load
+- interaction cost
+`;
+  }
+
+  /* -------------------------------------------------------
+     VIDEO INPUT
+  ------------------------------------------------------- */
+
+  if (
+    body.inputType === "video"
+  ) {
+    evidenceText = `
+Input type: Website/application video
+
+The attached images are representative frames
+extracted from the uploaded video.
+
+Analyze:
+
+- visual interface
+- interaction flow
+- friction
+- errors
+- navigation
+- cognitive load
+- interaction cost
+- visual hierarchy
+- usability
+
+If the frame sequence provides enough evidence,
+create a replayTimeline.
+`;
+  }
+
+  return `
+Analyze the provided UI evidence.
+
+${contextText}
+
+${evidenceText}
+
+Number of visual inputs:
+${images.length}
+
+Return a complete UX analysis following
+the required JSON schema.
+
+IMPORTANT:
+
+Every issue must be supported by visible evidence.
+
+Do not invent features, interactions, buttons,
+text, or UI elements that are not visible.
+
+Provide useful and actionable recommendations.
+`;
 }
 
-
-/* =======================================================
+/* =========================================================
    POST /api/analyze
-======================================================= */
+========================================================= */
 
 export async function POST(
   request: NextRequest
 ) {
-
   try {
+    /* =====================================================
+       PARSE REQUEST
+    ===================================================== */
 
-    /* ---------------------------------------------------
-       1. CHECK GEMINI API KEY
-    --------------------------------------------------- */
+    const body =
+      (await request.json()) as AnalysisRequest;
 
-    if (!GEMINI_API_KEY) {
+    if (!body) {
       return Response.json(
         {
           error:
-            "Gemini AI is not configured. Add GEMINI_API_KEY to .env.local.",
+            "Request body is required.",
         },
         {
-          status: 503,
+          status: 400,
         }
       );
     }
-
-
-    /* ---------------------------------------------------
-       2. READ REQUEST
-    --------------------------------------------------- */
-
-    const body: AnalysisRequest =
-      await request.json();
-
-
-    /* ---------------------------------------------------
-       3. VALIDATE INPUT TYPE
-    --------------------------------------------------- */
 
     if (!body.inputType) {
       return Response.json(
         {
           error:
-            "Missing input type.",
+            "inputType is required.",
         },
         {
           status: 400,
@@ -691,35 +431,65 @@ export async function POST(
       );
     }
 
+    let images: string[] = [];
+
+    let websiteInfo:
+      | CaptureResult
+      | undefined;
+
+    /* =====================================================
+       URL INPUT
+    ===================================================== */
 
     if (
-      body.inputType !== "screenshots" &&
-      body.inputType !== "video" &&
-      body.inputType !== "url"
+      body.inputType === "url"
     ) {
-      return Response.json(
-        {
-          error:
-            "Invalid analysis input type.",
-        },
-        {
-          status: 400,
-        }
+      if (!body.url) {
+        return Response.json(
+          {
+            error:
+              "URL is required.",
+          },
+          {
+            status: 400,
+          }
+        );
+      }
+
+      console.log(
+        `[OptiUX] Starting URL analysis: ${body.url}`
+      );
+
+      websiteInfo =
+        await captureWebsite(
+          body.url
+        );
+
+      images = [
+        websiteInfo.screenshot,
+      ];
+
+      console.log(
+        "[OptiUX] Website captured successfully."
       );
     }
 
+    /* =====================================================
+       SCREENSHOT INPUT
+    ===================================================== */
 
-    /* ---------------------------------------------------
-       4. VALIDATE SCREENSHOTS
-    --------------------------------------------------- */
-
-    if (
+    else if (
       body.inputType === "screenshots"
     ) {
+      images =
+        Array.isArray(
+          body.screenshots
+        )
+          ? body.screenshots
+          : [];
 
       if (
-        !body.screenshots ||
-        body.screenshots.length === 0
+        images.length === 0
       ) {
         return Response.json(
           {
@@ -733,61 +503,27 @@ export async function POST(
       }
     }
 
+    /* =====================================================
+       VIDEO INPUT
+    ===================================================== */
 
-    /* ---------------------------------------------------
-       5. VALIDATE VIDEO
-    --------------------------------------------------- */
-
-    if (
+    else if (
       body.inputType === "video"
     ) {
-
-      if (
-        !body.videoFrames ||
-        body.videoFrames.length === 0
-      ) {
-        return Response.json(
-          {
-            error:
-              "No video frames were provided.",
-          },
-          {
-            status: 400,
-          }
-        );
-      }
-    }
-
-
-    /* ---------------------------------------------------
-       6. VALIDATE URL
-    --------------------------------------------------- */
-
-    if (
-      body.inputType === "url"
-    ) {
-
-      if (!body.url) {
-        return Response.json(
-          {
-            error:
-              "Website URL is required.",
-          },
-          {
-            status: 400,
-          }
-        );
-      }
-
-      if (
-        !validateWebsiteUrl(
-          body.url
+      images =
+        Array.isArray(
+          body.videoFrames
         )
+          ? body.videoFrames
+          : [];
+
+      if (
+        images.length === 0
       ) {
         return Response.json(
           {
             error:
-              "Please provide a valid website URL starting with http:// or https://",
+              "Video frames are required.",
           },
           {
             status: 400,
@@ -796,127 +532,139 @@ export async function POST(
       }
     }
 
+    /* =====================================================
+       INVALID INPUT TYPE
+    ===================================================== */
 
-    /* ---------------------------------------------------
-       7. BUILD USER PROMPT
-    --------------------------------------------------- */
+    else {
+      return Response.json(
+        {
+          error:
+            "Unsupported input type.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
 
-    const userPrompt =
-      buildUserPrompt(
-        body
+    /* =====================================================
+       LIMIT IMAGES
+    ===================================================== */
+
+    images = images.slice(
+      0,
+      MAX_VIDEO_FRAMES
+    );
+
+    if (images.length === 0) {
+      return Response.json(
+        {
+          error:
+            "No visual evidence was provided.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       BUILD PROMPT
+    ===================================================== */
+
+    const prompt =
+      buildAnalysisPrompt(
+        body,
+        images,
+        websiteInfo
       );
 
+    /* =====================================================
+       CONVERT IMAGES
+    ===================================================== */
 
-    /* ---------------------------------------------------
-       8. PREPARE IMAGES
-    --------------------------------------------------- */
+    console.log(
+      `[OptiUX] Converting ${images.length} image(s) for Gemini...`
+    );
 
-    let images: string[] = [];
-
-
-    /* SCREENSHOTS */
-
-    if (
-      body.inputType === "screenshots" &&
-      body.screenshots
-    ) {
-      images =
-        body.screenshots;
-    }
-
-
-    /* VIDEO */
-
-    if (
-      body.inputType === "video" &&
-      body.videoFrames
-    ) {
-      images =
-        body.videoFrames;
-    }
-
-
-    /* URL */
-
-    if (
+    const imageSourceKind: ImageSourceKind =
       body.inputType === "url"
-    ) {
+        ? "website capture"
+        : body.inputType === "screenshots"
+          ? "screenshot"
+          : "video frame";
 
-      try {
-
-        console.log(
-          "Capturing website:",
-          body.url
-        );
-
-        const websiteScreenshot =
-          await captureWebsite(
-            body.url!
-          );
-
-        images = [
-          websiteScreenshot,
-        ];
-
-        console.log(
-          "Website screenshot captured successfully."
-        );
-
-      } catch (error) {
-
-        console.error(
-          "Website capture failed:",
-          error
-        );
-
-        return Response.json(
-          {
-            error:
-              "Unable to open or capture the website. Make sure the URL is publicly accessible and try again.",
-          },
-          {
-            status: 502,
-          }
-        );
-      }
-    }
-
-
-    /* ---------------------------------------------------
-       9. CALL GEMINI
-    --------------------------------------------------- */
-
-    const aiResponse =
-      await callGemini(
-        userPrompt,
-        images
-      );
-
-
-    /* ---------------------------------------------------
-       10. PARSE GEMINI RESPONSE
-    --------------------------------------------------- */
-
-    let parsed: unknown;
+    let imageParts: GeminiImagePart[];
 
     try {
-
-      parsed =
-        extractJSON(
-          aiResponse
+      imageParts =
+        convertImagesToGeminiParts(
+          images,
+          imageSourceKind
         );
-
-    } catch {
-
+    } catch (error) {
       console.error(
-        "Gemini returned invalid JSON:",
-        aiResponse
+        "[OptiUX] Image conversion failed:",
+        error
       );
 
       return Response.json(
         {
           error:
-            "Gemini returned an invalid UX analysis. Please try again.",
+            error instanceof Error
+              ? error.message
+              : "Invalid image data.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       SEND TO GEMINI
+    ===================================================== */
+
+    console.log(
+      "[OptiUX] Sending UX evidence to Gemini..."
+    );
+
+    const rawResponse =
+      await generateGeminiContent(
+        `${SYSTEM_PROMPT}
+
+${prompt}`,
+        imageParts
+      );
+
+    /* =====================================================
+       PARSE GEMINI JSON
+    ===================================================== */
+
+    let parsedResult:
+      | UXAnalysisResult
+      | undefined;
+
+    try {
+      parsedResult =
+        extractJson(
+          rawResponse
+        ) as UXAnalysisResult;
+    } catch (error) {
+      console.error(
+        "[OptiUX] Gemini JSON parse error:",
+        error
+      );
+
+      return Response.json(
+        {
+          error:
+            "Gemini returned an invalid analysis response.",
+          details:
+            error instanceof Error
+              ? error.message
+              : String(error),
         },
         {
           status: 502,
@@ -924,26 +672,24 @@ export async function POST(
       );
     }
 
+    /* =====================================================
+       VALIDATE RESULT
+    ===================================================== */
 
-    /* ---------------------------------------------------
-       11. VALIDATE ANALYSIS
-    --------------------------------------------------- */
+    const isValid =
+      validateAnalysisResult(
+        parsedResult
+      );
 
-    if (
-      !validateAnalysisResult(
-        parsed
-      )
-    ) {
-
+    if (!isValid) {
       console.error(
-        "Invalid analysis result:",
-        parsed
+        "[OptiUX] Invalid UX analysis result."
       );
 
       return Response.json(
         {
           error:
-            "Gemini response did not match the expected UX analysis format.",
+            "AI returned an invalid UX analysis.",
         },
         {
           status: 502,
@@ -951,19 +697,13 @@ export async function POST(
       );
     }
 
+    const result =
+      parsedResult as UXAnalysisResult;
 
-    /* ---------------------------------------------------
-       12. CREATE RESULT
-    --------------------------------------------------- */
-
-    const result:
-      UXAnalysisResult =
-      parsed;
-
-
-    /* ---------------------------------------------------
-       13. UX REPLAY ONLY FOR VIDEO
-    --------------------------------------------------- */
+    /* =====================================================
+       REPLAY TIMELINE
+       ONLY VIDEO SHOULD HAVE REPLAY.
+    ===================================================== */
 
     if (
       body.inputType !== "video"
@@ -971,26 +711,75 @@ export async function POST(
       delete result.replayTimeline;
     }
 
+    /* =====================================================
+       SAVE TO DATABASE
+    ===================================================== */
 
-    /* ---------------------------------------------------
-       14. RETURN RESULT
-    --------------------------------------------------- */
+    let savedId: string | undefined;
 
-    return Response.json({
+    try {
+      savedId = await saveAnalysis({
+        inputType: body.inputType,
+        url: body.url,
+        context: body.context,
+        result,
+        rawJson: parsedResult,
+      });
+
+      console.log(
+        `[OptiUX] Analysis saved to database: ${savedId}`
+      );
+    } catch (dbError) {
+      console.error(
+        "[OptiUX] Failed to save analysis to database:",
+        dbError
+      );
+    }
+
+    /* =====================================================
+       SUCCESS
+    ===================================================== */
+
+    console.log(
+      "[OptiUX] UX analysis completed successfully."
+    );
+
+    return Response.json(
       result,
-    });
-
+      {
+        status: 200,
+      }
+    );
   } catch (error) {
-
     console.error(
-      "OptiUX-AI analysis error:",
+      "[OptiUX] Analysis error:",
       error
     );
+
+    /*
+     * Quota / billing problems: return a clear,
+     * actionable message. NEVER forward the raw
+     * Gemini ApiError JSON to the client.
+     */
+
+    const quotaMessage =
+      formatQuotaError(error);
+
+    if (quotaMessage) {
+      return Response.json(
+        {
+          error: quotaMessage,
+        },
+        {
+          status: 429,
+        }
+      );
+    }
 
     const message =
       error instanceof Error
         ? error.message
-        : "Internal server error.";
+        : String(error);
 
     return Response.json(
       {

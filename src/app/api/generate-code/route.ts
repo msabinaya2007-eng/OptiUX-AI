@@ -1,21 +1,30 @@
 import type { NextRequest } from "next/server";
-import { GoogleGenAI } from "@google/genai";
+
+import { formatQuotaError, generateGeminiContent } from "@/lib/ai/gemini";
+
 import type {
   UXIssue,
   UXRecommendation,
   AnalysisContext,
 } from "@/types";
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+/* =====================================================
+   TYPES
+===================================================== */
 
-// Use the same Gemini model that is working for your UX analysis.
-const GEMINI_MODEL = "gemini-3.5-flash";
+interface SelectedDesign {
+  name: string;
+  description: string;
+  html: string;
+  css: string;
+}
 
 interface GenerateCodeRequest {
   issues: UXIssue[];
   recommendations: UXRecommendation[];
   technology: string;
   context?: AnalysisContext;
+  selectedDesign?: SelectedDesign;
 }
 
 interface GeneratedCodeBlock {
@@ -28,142 +37,330 @@ interface GeneratedCodeResponse {
   blocks: GeneratedCodeBlock[];
 }
 
+/* =====================================================
+   SYSTEM PROMPT
+===================================================== */
+
 const SYSTEM_PROMPT = `
-You are OptiUX-AI, an expert frontend developer and UX engineer.
+You are OptiUX-AI, an expert frontend engineer and UX engineer.
 
-Your job is to generate improved frontend code based on UX issues and recommendations identified by an AI UX evaluation.
+Your job is to convert an AI-generated visual UX redesign
+prototype into real, usable frontend code.
 
-The goal is to provide real, functional, production-quality frontend code that directly addresses the identified UX problems.
+The user has already selected one visual redesign.
 
-Return valid JSON matching EXACTLY this structure:
+You MUST use that selected design as the primary source of truth.
+
+====================================================
+GOAL
+====================================================
+
+Convert the selected HTML/CSS prototype into the requested
+frontend technology.
+
+Preserve:
+
+- layout
+- visual hierarchy
+- spacing
+- typography
+- colors
+- cards
+- buttons
+- navigation
+- forms
+- sections
+- responsive behavior
+- accessibility improvements
+- UX improvements
+
+Do NOT redesign the selected design again.
+
+The selected design has already been chosen by the user.
+
+====================================================
+TECHNOLOGY
+====================================================
+
+If technology is:
+
+HTML + CSS + JavaScript
+→ Generate standard HTML/CSS/JavaScript.
+
+React
+→ Generate React + JSX/TSX compatible code.
+
+Next.js
+→ Generate Next.js compatible React code.
+
+React + Tailwind CSS
+→ Convert the design to React using Tailwind CSS.
+
+Next.js + Tailwind CSS
+→ Convert the design to Next.js using Tailwind CSS.
+
+====================================================
+IMPORTANT
+====================================================
+
+The selected prototype may contain:
+
+HTML
+CSS
+
+Treat these as the visual source.
+
+Translate them accurately into the requested technology.
+
+Do NOT simply copy the HTML/CSS if another technology
+was requested.
+
+====================================================
+UX REQUIREMENTS
+====================================================
+
+The generated implementation must:
+
+- be responsive
+- use semantic HTML
+- have accessible buttons
+- have accessible form controls
+- have meaningful labels
+- support keyboard navigation
+- have visible focus states where relevant
+- preserve readable contrast
+- preserve clear visual hierarchy
+- minimize unnecessary interactions
+- preserve the selected design's UX improvements
+
+====================================================
+CODE QUALITY
+====================================================
+
+Generate real functional code.
+
+Do NOT generate pseudocode.
+
+Do NOT use placeholders such as:
+
+TODO
+IMPLEMENT HERE
+YOUR CODE HERE
+
+Use realistic content.
+
+Include imports when required.
+
+For React/Next.js:
+
+- Use functional components.
+- Use TypeScript where appropriate.
+- Do not use unnecessary dependencies.
+- Do not invent dependencies.
+
+For Next.js:
+
+Use client components only when interaction/state
+actually requires them.
+
+====================================================
+OUTPUT
+====================================================
+
+Return ONLY valid JSON.
+
+Do NOT use Markdown.
+
+Do NOT use code fences.
+
+Return EXACTLY:
 
 {
   "blocks": [
     {
-      "issueTitle": "The UX issue this code addresses",
-      "recommendation": "The UX recommendation being implemented",
-      "code": "The complete functional code snippet"
+      "issueTitle": "Selected Design Implementation",
+      "recommendation": "Implementation of the selected UX redesign",
+      "code": "Complete frontend implementation"
     }
   ]
 }
 
-IMPORTANT RULES:
+The code field must contain the actual implementation.
 
-1. Generate real, functional code.
-2. Do not generate pseudocode.
-3. Follow best practices for the requested technology.
-4. Each code block should address one specific UX issue.
-5. Focus on the most important UX issues first.
-6. Prioritize critical and high-severity issues.
-7. Include proper imports when using React, Next.js, or other frameworks.
-8. Include clear code comments explaining the UX improvements.
-9. Make the code accessible.
-10. Follow semantic HTML practices where applicable.
-11. Use appropriate ARIA attributes when necessary.
-12. Improve keyboard accessibility where relevant.
-13. Improve visual hierarchy where relevant.
-14. Reduce unnecessary interaction steps where relevant.
-15. Reduce cognitive load where relevant.
-16. Improve CTA visibility where relevant.
-17. Improve readability and usability where relevant.
-
-IMPORTANT:
-
-The generated code must match the requested technology.
-
-If the technology is:
-- React: Generate React code.
-- Next.js: Generate Next.js compatible code.
-- HTML/CSS: Generate HTML and CSS.
-- TypeScript: Generate TypeScript code.
-- JavaScript: Generate JavaScript code.
-
-Do not invent technologies that were not requested.
-
-Return ONLY the JSON object.
-
-Do NOT use Markdown code fences.
-
-Do NOT include explanations before or after the JSON.
+Do not put explanations outside the JSON.
 `;
 
-async function generateCodeWithGemini(
-  userPrompt: string
-): Promise<string> {
-  if (!GEMINI_API_KEY) {
-    throw new Error(
-      "GEMINI_API_KEY is not configured. Add your Gemini API key to .env.local."
-    );
-  }
+/* =====================================================
+   GEMINI GENERATION
+===================================================== */
 
-  const ai = new GoogleGenAI({
-    apiKey: GEMINI_API_KEY,
-  });
+/*
+ * generateGeminiContent() (src/lib/ai/gemini.ts) is used
+ * instead of a raw SDK call so code generation gets the
+ * same retry/backoff behavior as UX analysis for
+ * temporary API failures.
+ *
+ * Permanent failures (e.g. free-tier daily quota,
+ * billing problems) fail fast and are translated into
+ * clear user-facing messages via formatQuotaError().
+ */
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-
-    contents: [
-      {
-        role: "user",
-        parts: [
-          {
-            text: `${SYSTEM_PROMPT}
-
-${userPrompt}`,
-          },
-        ],
-      },
-    ],
-
-    config: {
-      temperature: 0.3,
-
-      responseMimeType: "application/json",
-    },
-  });
-
-  return response.text || "";
+function errorToMessage(
+  error: unknown
+): string {
+  return error instanceof Error
+    ? error.message
+    : String(error);
 }
 
-function extractJSON(text: string): unknown {
+/* =====================================================
+   JSON EXTRACTION
+===================================================== */
+
+/*
+ * Gemini sometimes wraps JSON in Markdown fences even
+ * when told not to — including asymmetric cases such as
+ * a leading "```json" but a bare trailing "```", or
+ * stray fences after the closing brace. Strip every
+ * fence variant from both ends before parsing.
+ */
+
+function stripMarkdownFences(
+  text: string
+): string {
   let cleaned = text.trim();
 
-  // Remove JSON Markdown code fences if Gemini returns them.
-  if (cleaned.startsWith("```json")) {
+  for (;;) {
+    const before = cleaned;
+
     cleaned = cleaned
-      .replace(/^```json/, "")
-      .replace(/```$/, "")
+      .replace(
+        /^```[a-zA-Z0-9_-]*\s*/,
+        ""
+      )
+      .replace(
+        /```\s*$/,
+        ""
+      )
       .trim();
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned
-      .replace(/^```/, "")
-      .replace(/```$/, "")
-      .trim();
+
+    if (cleaned === before) {
+      break;
+    }
   }
 
-  // Try parsing the complete response.
+  return cleaned;
+}
+
+/*
+ * Find the first "{" and its MATCHING closing brace,
+ * respecting JSON strings and escape sequences. Naive
+ * first-{ / last-} slicing breaks when the model appends
+ * extra text containing braces after the JSON body.
+ */
+
+function extractBalancedJsonObject(
+  text: string
+): string | null {
+  const start = text.indexOf("{");
+
+  if (start === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (
+    let i = start;
+    i < text.length;
+    i++
+  ) {
+    const char = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      depth++;
+    } else if (char === "}") {
+      depth--;
+
+      if (depth === 0) {
+        return text.slice(
+          start,
+          i + 1
+        );
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractJSON(
+  text: string
+): unknown {
+  const cleaned =
+    stripMarkdownFences(text);
+
+  // Attempt 1: the whole payload is JSON.
+
   try {
     return JSON.parse(cleaned);
   } catch {
-    // Continue with fallback.
+    // Continue.
   }
 
-  // Find JSON object inside the response.
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
+  // Attempt 2: balanced-brace extraction.
 
-  if (
-    start !== -1 &&
-    end !== -1 &&
-    end > start
-  ) {
-    const jsonString = cleaned.slice(
-      start,
-      end + 1
+  const balanced =
+    extractBalancedJsonObject(
+      cleaned
     );
 
-    return JSON.parse(jsonString);
+  if (balanced) {
+    try {
+      return JSON.parse(balanced);
+    } catch {
+      // Continue.
+    }
+  }
+
+  // Attempt 3: naive outermost-brace slice.
+
+  const first =
+    cleaned.indexOf("{");
+
+  const last =
+    cleaned.lastIndexOf("}");
+
+  if (
+    first !== -1 &&
+    last > first
+  ) {
+    try {
+      return JSON.parse(
+        cleaned.slice(
+          first,
+          last + 1
+        )
+      );
+    } catch {
+      // Fall through to failure.
+    }
   }
 
   throw new Error(
@@ -171,15 +368,88 @@ function extractJSON(text: string): unknown {
   );
 }
 
+/*
+ * Safe bounded logging — never dump entire
+ * multi-KB code payloads into server logs.
+ */
+
+function safeSnippet(
+  text: string
+): string {
+  const singleLine = text
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return singleLine.length > 300
+    ? `${singleLine.substring(0, 300)}... [truncated, ${text.length} chars total]`
+    : singleLine;
+}
+
+/* =====================================================
+   TYPE HELPERS
+===================================================== */
+
+function isRecord(
+  value: unknown
+): value is Record<
+  string,
+  unknown
+> {
+  return (
+    typeof value ===
+      "object" &&
+    value !== null
+  );
+}
+
+function isGeneratedCodeResponse(
+  value: unknown
+): value is GeneratedCodeResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  if (
+    !Array.isArray(
+      value.blocks
+    )
+  ) {
+    return false;
+  }
+
+  return value.blocks.every(
+    (block) => {
+      if (
+        !isRecord(block)
+      ) {
+        return false;
+      }
+
+      return (
+        typeof block.issueTitle ===
+          "string" &&
+        typeof block.recommendation ===
+          "string" &&
+        typeof block.code ===
+          "string"
+      );
+    }
+  );
+}
+
+/* =====================================================
+   POST
+===================================================== */
+
 export async function POST(
   request: NextRequest
-) {
+): Promise<Response> {
   try {
-    /*
-     * 1. Check Gemini API key.
-     */
+    /* =================================================
+       1. CHECK API KEY
+    ================================================= */
 
-    if (!GEMINI_API_KEY) {
+    if (!process.env.GEMINI_API_KEY) {
       return Response.json(
         {
           error:
@@ -191,25 +461,27 @@ export async function POST(
       );
     }
 
-    /*
-     * 2. Read request body.
-     */
+    /* =================================================
+       2. READ BODY
+    ================================================= */
 
-    const body: GenerateCodeRequest =
-      await request.json();
+    const body =
+      (await request.json()) as GenerateCodeRequest;
 
-    /*
-     * 3. Validate UX issues.
-     */
+    /* =================================================
+       3. VALIDATE ISSUES
+    ================================================= */
 
     if (
-      !body.issues ||
+      !Array.isArray(
+        body.issues
+      ) ||
       body.issues.length === 0
     ) {
       return Response.json(
         {
           error:
-            "No UX issues were provided for code generation.",
+            "No UX issues were provided.",
         },
         {
           status: 400,
@@ -217,11 +489,15 @@ export async function POST(
       );
     }
 
-    /*
-     * 4. Validate technology.
-     */
+    /* =================================================
+       4. VALIDATE TECHNOLOGY
+    ================================================= */
 
-    if (!body.technology) {
+    if (
+      !body.technology ||
+      body.technology.trim()
+        .length === 0
+    ) {
       return Response.json(
         {
           error:
@@ -233,140 +509,313 @@ export async function POST(
       );
     }
 
-    /*
-     * 5. Prepare UX issue summary.
-     */
+    /* =================================================
+       5. VALIDATE SELECTED DESIGN
+    ================================================= */
+
+    if (!body.selectedDesign) {
+      return Response.json(
+        {
+          error:
+            "Please select Design A or Design B before generating frontend code.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    const selectedDesign =
+      body.selectedDesign;
+
+    if (
+      !selectedDesign.html ||
+      !selectedDesign.css
+    ) {
+      return Response.json(
+        {
+          error:
+            "The selected design does not contain valid HTML/CSS.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =================================================
+       6. UX ISSUES
+    ================================================= */
 
     const issuesSummary =
       body.issues
         .map(
-          (issue, index) =>
-            `${index + 1}. [${issue.severity}] ${issue.title}
-Category: ${issue.category}
-Description: ${issue.description}
-Evidence: ${issue.evidence}
-Recommendation: ${issue.recommendation}`
+          (
+            issue,
+            index
+          ) =>
+            `${index + 1}. [${
+              issue.severity
+            }] ${
+              issue.title
+            }
+
+Category:
+${issue.category}
+
+Description:
+${issue.description}
+
+Evidence:
+${issue.evidence}
+
+Recommendation:
+${issue.recommendation}`
         )
-        .join("\n\n");
+        .join(
+          "\n\n"
+        );
 
-    /*
-     * 6. Prepare recommendations summary.
-     */
+    /* =================================================
+       7. RECOMMENDATIONS
+    ================================================= */
 
-    const recsSummary =
+    const recommendationsSummary =
       body.recommendations
         ?.map(
-          (recommendation, index) =>
-            `${index + 1}. [${recommendation.impact}] ${recommendation.title}
-Description: ${recommendation.description}`
+          (
+            recommendation,
+            index
+          ) =>
+            `${index + 1}. [${
+              recommendation.impact
+            }] ${
+              recommendation.title
+            }
+
+Description:
+${recommendation.description}`
         )
-        .join("\n\n") ||
-      "No additional recommendations provided.";
+        .join(
+          "\n\n"
+        ) ||
+      "No additional recommendations.";
 
-    /*
-     * 7. Prepare project context.
-     */
+    /* =================================================
+       8. CONTEXT
+    ================================================= */
 
-    let contextStr = "";
+    let contextSummary =
+      "";
 
     if (body.context) {
-      if (body.context.projectName) {
-        contextStr +=
+      if (
+        body.context.projectName
+      ) {
+        contextSummary +=
           `Project: ${body.context.projectName}\n`;
       }
 
-      if (body.context.targetAudience) {
-        contextStr +=
+      if (
+        body.context.targetAudience
+      ) {
+        contextSummary +=
           `Target Audience: ${body.context.targetAudience}\n`;
       }
 
-      if (body.context.productDescription) {
-        contextStr +=
+      if (
+        body.context.productDescription
+      ) {
+        contextSummary +=
           `Product Description: ${body.context.productDescription}\n`;
       }
 
-      if (body.context.uxGoals) {
-        contextStr +=
+      if (
+        body.context.uxGoals
+      ) {
+        contextSummary +=
           `UX Goals: ${body.context.uxGoals}\n`;
       }
     }
 
-    /*
-     * 8. Build Gemini prompt.
-     */
+    /* =================================================
+       9. BUILD PROMPT
+    ================================================= */
 
     const userPrompt = `
-Generate improved frontend code using:
+Convert the following selected visual design into
+production-ready frontend code.
 
-Technology:
+====================================================
+TARGET TECHNOLOGY
+====================================================
+
 ${body.technology}
 
-${contextStr
-  ? `Project Context:
-${contextStr}
-`
-  : ""}
+====================================================
+SELECTED DESIGN
+====================================================
 
-UX Issues Identified:
+Design name:
+${selectedDesign.name}
+
+Design description:
+${selectedDesign.description}
+
+====================================================
+SELECTED DESIGN HTML
+====================================================
+
+${selectedDesign.html}
+
+====================================================
+SELECTED DESIGN CSS
+====================================================
+
+${selectedDesign.css}
+
+====================================================
+UX ISSUES
+====================================================
 
 ${issuesSummary}
 
-UX Recommendations:
+====================================================
+UX RECOMMENDATIONS
+====================================================
 
-${recsSummary}
+${recommendationsSummary}
 
-TASK:
+====================================================
+PROJECT CONTEXT
+====================================================
 
-Generate improved frontend code that directly addresses the most important UX issues.
+${
+  contextSummary ||
+  "No additional project context provided."
+}
 
-Prioritize:
-1. Critical severity issues.
-2. High severity issues.
-3. Medium severity issues.
-4. Low severity issues.
+====================================================
+IMPLEMENTATION TASK
+====================================================
 
-For each major UX issue, generate a separate code block.
+Convert the selected design into:
 
-Each code block must contain:
-- The UX issue being addressed.
-- The recommendation being implemented.
-- Complete functional frontend code.
-
-Make sure the generated code is compatible with:
 ${body.technology}
 
-Return ONLY the required JSON structure.
+The selected design is the source of truth.
+
+Preserve its visual appearance and UX decisions.
+
+Do not create a different design.
+
+Make the result functional and production-quality.
+
+If multiple UX issues exist, prioritize the most important
+ones while preserving the selected design.
+
+Return ONLY the required JSON response.
 `;
 
-    /*
-     * 9. Call Gemini.
-     */
+    /* =================================================
+       10. CALL GEMINI
+    ================================================= */
+
+    const fullPrompt = `${SYSTEM_PROMPT}
+
+${userPrompt}`;
 
     const aiContent =
-      await generateCodeWithGemini(
-        userPrompt
+      await generateGeminiContent(
+        fullPrompt
       );
 
-    /*
-     * 10. Parse Gemini response.
-     */
+    /* =================================================
+       11. PARSE RESPONSE (WITH ONE AUTO-RETRY)
+
+       Gemini occasionally returns malformed or
+       fenced JSON. One automatic regeneration
+       usually fixes it without user action.
+    ================================================= */
 
     let parsed: unknown;
 
+    let parseFailed = false;
+
     try {
-      parsed = extractJSON(
-        aiContent
-      );
-    } catch (error) {
+      parsed = extractJSON(aiContent);
+    } catch {
+      parseFailed = true;
+    }
+
+    if (!parseFailed && !isGeneratedCodeResponse(parsed)) {
+      parseFailed = true;
+    }
+
+    if (parseFailed) {
       console.error(
-        "Gemini returned invalid JSON:",
-        aiContent
+        "[OptiUX] First code-gen response unusable, retrying once. Snippet:",
+        safeSnippet(aiContent)
+      );
+
+      const retryContent =
+        await generateGeminiContent(
+          `${fullPrompt}
+
+IMPORTANT: Your previous response could not be parsed.
+Return ONLY the raw JSON object. No Markdown fences,
+no commentary, no text before or after the JSON.`,
+          []
+        );
+
+      try {
+        parsed = extractJSON(retryContent);
+
+        if (
+          !isGeneratedCodeResponse(
+            parsed
+          )
+        ) {
+          throw new Error(
+            "Invalid response structure."
+          );
+        }
+      } catch (retryError) {
+        console.error(
+          "[OptiUX] Code-gen retry also failed. Snippet:",
+          safeSnippet(retryContent),
+          retryError
+        );
+
+        return Response.json(
+          {
+            error:
+              "Gemini returned an invalid code generation response after a retry. Please try again in a moment.",
+          },
+          {
+            status: 502,
+          }
+        );
+      }
+    }
+
+    /* =================================================
+       12. VALIDATE RESPONSE
+    ================================================= */
+
+    if (
+      !isGeneratedCodeResponse(
+        parsed
+      )
+    ) {
+      console.error(
+        "[OptiUX] Invalid generated code structure."
       );
 
       return Response.json(
         {
           error:
-            "Gemini returned an invalid code generation response. Please try again.",
+            "Gemini returned an invalid frontend code structure.",
         },
         {
           status: 502,
@@ -374,44 +823,66 @@ Return ONLY the required JSON structure.
       );
     }
 
+    /* =================================================
+       13. RETURN
+    ================================================= */
+
+    return Response.json(
+      {
+        blocks:
+          parsed.blocks,
+
+        technology:
+          body.technology,
+
+        selectedDesign:
+          selectedDesign.name,
+      },
+      {
+        status: 200,
+      }
+    );
+  } catch (error: unknown) {
+    console.error(
+      "OptiUX-AI code generation error:",
+      error
+    );
+
     /*
-     * 11. Validate generated blocks.
+     * Quota / billing problems: return a clear,
+     * actionable message. NEVER forward the raw
+     * Gemini ApiError JSON to the client.
      */
 
-    const generated =
-      parsed as GeneratedCodeResponse;
+    const quotaMessage =
+      formatQuotaError(error);
+
+    if (quotaMessage) {
+      return Response.json(
+        {
+          error: quotaMessage,
+        },
+        {
+          status: 429,
+        }
+      );
+    }
 
     if (
-      !generated ||
-      !Array.isArray(
-        generated.blocks
+      errorToMessage(error).includes(
+        "GEMINI_API_KEY"
       )
     ) {
       return Response.json(
         {
           error:
-            "Gemini response did not contain valid generated code blocks.",
+            "AI code generation is not configured. Add GEMINI_API_KEY to .env.local.",
         },
         {
-          status: 502,
+          status: 503,
         }
       );
     }
-
-    /*
-     * 12. Return generated code.
-     */
-
-    return Response.json({
-      blocks: generated.blocks,
-      technology:
-        body.technology,
-    });
-  } catch (error) {
-    console.error(
-      "OptiUX-AI code generation error:",
-      error
-    );
 
     const message =
       error instanceof Error

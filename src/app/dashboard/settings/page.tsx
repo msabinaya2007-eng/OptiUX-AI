@@ -3,20 +3,48 @@
 import { useAuth } from "@/lib/auth-context";
 import { useAnalysis } from "@/lib/analysis-context";
 import { toast } from "sonner";
+import { useState, useEffect } from "react";
 import { Trash2, AlertTriangle } from "lucide-react";
 
 export default function SettingsPage() {
   const { user } = useAuth();
-  const { clearAll, totalAnalyses } = useAnalysis();
+  const { clearAll } = useAnalysis();
+  const [totalAnalyses, setTotalAnalyses] = useState<number | null>(null);
+  const [clearing, setClearing] = useState(false);
 
-  const handleClearAll = () => {
+  useEffect(() => {
+    fetch("/api/analyses")
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to fetch");
+        return res.json();
+      })
+      .then((data) => setTotalAnalyses(data.length))
+      .catch(() => setTotalAnalyses(0));
+  }, []);
+
+  const handleClearAll = async () => {
     if (
-      confirm(
-        "Are you sure you want to clear all local analysis data? This cannot be undone."
+      !confirm(
+        "This will permanently delete ALL analysis records from the database and clear local session data. This cannot be undone."
       )
     ) {
+      return;
+    }
+
+    setClearing(true);
+
+    try {
+      const res = await fetch("/api/analyses", { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete from database");
+
       clearAll();
-      toast.success("All local data cleared");
+      setTotalAnalyses(0);
+      toast.success("All analysis data cleared (database + local storage)");
+    } catch (err) {
+      console.error("[OptiUX] Clear all failed:", err);
+      toast.error("Failed to clear data. Please try again.");
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -45,20 +73,20 @@ export default function SettingsPage() {
         </div>
 
         <div className="p-5 rounded-2xl border border-border bg-white dark:bg-muted/30">
-          <h3 className="text-sm font-semibold mb-3">Local Data</h3>
+          <h3 className="text-sm font-semibold mb-3">Data Storage</h3>
           <div className="space-y-2 mb-4">
             <div className="flex justify-between text-sm">
               <span className="text-muted-foreground">Total Analyses</span>
-              <span>{totalAnalyses}</span>
+              <span>{totalAnalyses === null ? "—" : totalAnalyses}</span>
             </div>
             <div className="flex justify-between text-sm">
-              <span className="text-muted-foreground">Data Storage</span>
-              <span>Browser localStorage</span>
+              <span className="text-muted-foreground">Storage</span>
+              <span>PostgreSQL (server) + localStorage (session only)</span>
             </div>
           </div>
           <p className="text-xs text-muted-foreground mb-4">
-            All analysis data is stored locally in your browser. No data is sent
-            to any server except for the AI API during analysis.
+            Analysis records are stored in the database. Only the most recent
+            session result is kept in your browser for quick access.
           </p>
         </div>
 
@@ -70,15 +98,16 @@ export default function SettingsPage() {
                 Danger Zone
               </h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Clear all locally stored analysis data. This will remove your
-                current session and analysis count.
+                Permanently delete ALL analysis records from the database and
+                clear your local session. This action is irreversible.
               </p>
               <button
                 onClick={handleClearAll}
-                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-danger border border-danger/30 rounded-lg hover:bg-danger/10 transition-colors"
+                disabled={clearing}
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-danger border border-danger/30 rounded-lg hover:bg-danger/10 transition-colors disabled:opacity-50"
               >
                 <Trash2 className="w-4 h-4" />
-                Clear All Data
+                {clearing ? "Clearing..." : "Clear All Data"}
               </button>
             </div>
           </div>
