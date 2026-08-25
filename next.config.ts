@@ -1,8 +1,15 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   reactCompiler: true,
+
+  serverExternalPackages: ["playwright"],
+
+  outputFileTracingIncludes: {
+    "/api/analyze/**": [
+      "./node_modules/playwright-core/browsers.json",
+    ],
+  },
 };
 
 export default nextConfig;
