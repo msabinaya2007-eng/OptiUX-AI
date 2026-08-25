@@ -1,5 +1,3 @@
-import { chromium } from "playwright";
-
 export type WebsiteCaptureResult = {
   screenshot: string;
   title: string;
@@ -48,52 +46,47 @@ export async function captureWebsite(
 ): Promise<WebsiteCaptureResult> {
   const normalizedUrl = normalizeUrl(url);
 
-  let browser:
-    | Awaited<
-        ReturnType<typeof chromium.launch>
-      >
-    | null = null;
+  let browser: Awaited<
+    ReturnType<
+      typeof import("playwright").chromium.launch
+    >
+  > | null = null;
 
   try {
     console.log(
       `[OptiUX] Opening website: ${normalizedUrl}`
     );
 
+    // Load Playwright only when URL capture is actually needed.
+    const { chromium } = await import("playwright");
+
     browser = await chromium.launch({
       headless: true,
     });
 
-    const context =
-      await browser.newContext({
-        viewport: {
-          width: 1440,
-          height: 900,
-        },
+    const context = await browser.newContext({
+      viewport: {
+        width: 1440,
+        height: 900,
+      },
 
-        deviceScaleFactor: 1,
+      deviceScaleFactor: 1,
 
-        ignoreHTTPSErrors: true,
+      ignoreHTTPSErrors: true,
 
-        userAgent:
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-      });
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+    });
 
-    const page =
-      await context.newPage();
+    const page = await context.newPage();
 
-    page.setDefaultNavigationTimeout(
-      30000
-    );
-
+    page.setDefaultNavigationTimeout(30000);
     page.setDefaultTimeout(15000);
 
-    await page.goto(
-      normalizedUrl,
-      {
-        waitUntil: "domcontentloaded",
-        timeout: 30000,
-      }
-    );
+    await page.goto(normalizedUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
 
     await page
       .waitForLoadState("networkidle", {
@@ -105,31 +98,34 @@ export async function captureWebsite(
         );
       });
 
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(1000);
 
-    const title =
-      await page
-        .title()
-        .catch(() => "");
+    await page
+      .evaluate(() =>
+        Promise.race([
+          document.fonts.ready,
+          new Promise((resolve) => setTimeout(resolve, 4000)),
+        ])
+      )
+      .catch(() => {});
 
-    const description =
-      await page
-        .locator(
-          'meta[name="description"]'
-        )
-        .getAttribute("content")
-        .catch(() => null);
+    const title = await page
+      .title()
+      .catch(() => "");
 
-    const screenshotBuffer =
-      await page.screenshot({
-        type: "png",
-        fullPage: true,
-      });
+    const description = await page
+      .locator('meta[name="description"]')
+      .getAttribute("content")
+      .catch(() => null);
+
+    const screenshotBuffer = await page.screenshot({
+      type: "png",
+      fullPage: true,
+      timeout: 30000,
+    });
 
     const screenshot =
-      `data:image/png;base64,${screenshotBuffer.toString(
-        "base64"
-      )}`;
+      `data:image/png;base64,${screenshotBuffer.toString("base64")}`;
 
     await context.close();
 
@@ -140,8 +136,7 @@ export async function captureWebsite(
     return {
       screenshot,
       title,
-      description:
-        description || "",
+      description: description || "",
       url: normalizedUrl,
     };
   } catch (error) {
@@ -160,9 +155,7 @@ export async function captureWebsite(
     );
   } finally {
     if (browser) {
-      await browser
-        .close()
-        .catch(() => {});
+      await browser.close().catch(() => {});
     }
   }
 }
