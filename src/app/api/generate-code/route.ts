@@ -4,7 +4,10 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-import { formatQuotaError, generateGeminiContent } from "@/lib/ai/gemini";
+import {
+  formatQuotaError,
+  generateGeminiContent,
+} from "@/lib/ai/gemini";
 
 import type {
   UXIssue,
@@ -89,19 +92,19 @@ TECHNOLOGY
 If technology is:
 
 HTML + CSS + JavaScript
-→ Generate standard HTML/CSS/JavaScript.
+Generate standard HTML/CSS/JavaScript.
 
 React
-→ Generate React + JSX/TSX compatible code.
+Generate React + JSX/TSX compatible code.
 
 Next.js
-→ Generate Next.js compatible React code.
+Generate Next.js compatible React code.
 
 React + Tailwind CSS
-→ Convert the design to React using Tailwind CSS.
+Convert the design to React using Tailwind CSS.
 
 Next.js + Tailwind CSS
-→ Convert the design to Next.js using Tailwind CSS.
+Convert the design to Next.js using Tailwind CSS.
 
 ====================================================
 IMPORTANT
@@ -177,7 +180,7 @@ Do NOT use Markdown.
 
 Do NOT use code fences.
 
-Return EXACTLY:
+Return exactly this structure:
 
 {
   "blocks": [
@@ -192,26 +195,23 @@ Return EXACTLY:
 The code field must contain the actual implementation.
 
 Do not put explanations outside the JSON.
+
+IMPORTANT:
+The JSON must be syntactically valid.
+
+Escape all double quotes that appear inside
+the generated code string.
+
+Do not add trailing commas.
+
+Do not wrap the JSON in Markdown fences.
 `;
 
 /* =====================================================
-   GEMINI GENERATION
+   ERROR HELPERS
 ===================================================== */
 
-/*
- * generateGeminiContent() (src/lib/ai/gemini.ts) is used
- * instead of a raw SDK call so code generation gets the
- * same retry/backoff behavior as UX analysis for
- * temporary API failures.
- *
- * Permanent failures (e.g. free-tier daily quota,
- * billing problems) fail fast and are translated into
- * clear user-facing messages via formatQuotaError().
- */
-
-function errorToMessage(
-  error: unknown
-): string {
+function errorToMessage(error: unknown): string {
   return error instanceof Error
     ? error.message
     : String(error);
@@ -221,48 +221,30 @@ function errorToMessage(
    JSON EXTRACTION
 ===================================================== */
 
-/*
- * Gemini sometimes wraps JSON in Markdown fences even
- * when told not to — including asymmetric cases such as
- * a leading "```json" but a bare trailing "```", or
- * stray fences after the closing brace. Strip every
- * fence variant from both ends before parsing.
- */
-
-function stripMarkdownFences(
-  text: string
-): string {
+function stripMarkdownFences(text: string): string {
   let cleaned = text.trim();
 
-  for (;;) {
-    const before = cleaned;
-
-    cleaned = cleaned
-      .replace(
-        /^```[a-zA-Z0-9_-]*\s*/,
-        ""
-      )
-      .replace(
-        /```\s*$/,
-        ""
-      )
-      .trim();
-
-    if (cleaned === before) {
-      break;
-    }
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(
+      /^```(?:json|javascript|typescript|tsx|jsx)?\s*/i,
+      ""
+    );
   }
 
-  return cleaned;
+  if (cleaned.endsWith("```")) {
+    cleaned = cleaned.replace(
+      /```\s*$/,
+      ""
+    );
+  }
+
+  return cleaned.trim();
 }
 
 /*
- * Find the first "{" and its MATCHING closing brace,
- * respecting JSON strings and escape sequences. Naive
- * first-{ / last-} slicing breaks when the model appends
- * extra text containing braces after the JSON body.
+ * Finds a balanced JSON object while respecting strings,
+ * escaped quotes, and nested braces.
  */
-
 function extractBalancedJsonObject(
   text: string
 ): string | null {
@@ -276,11 +258,7 @@ function extractBalancedJsonObject(
   let inString = false;
   let escaped = false;
 
-  for (
-    let i = start;
-    i < text.length;
-    i++
-  ) {
+  for (let i = start; i < text.length; i++) {
     const char = text[i];
 
     if (inString) {
@@ -303,10 +281,7 @@ function extractBalancedJsonObject(
       depth--;
 
       if (depth === 0) {
-        return text.slice(
-          start,
-          i + 1
-        );
+        return text.slice(start, i + 1);
       }
     }
   }
@@ -314,26 +289,22 @@ function extractBalancedJsonObject(
   return null;
 }
 
-function extractJSON(
-  text: string
-): unknown {
-  const cleaned =
-    stripMarkdownFences(text);
+/*
+ * Attempts several safe ways to recover JSON.
+ */
+function extractJSON(text: string): unknown {
+  const cleaned = stripMarkdownFences(text);
 
-  // Attempt 1: the whole payload is JSON.
-
+  /* Attempt 1: complete response */
   try {
     return JSON.parse(cleaned);
   } catch {
     // Continue.
   }
 
-  // Attempt 2: balanced-brace extraction.
-
+  /* Attempt 2: balanced object */
   const balanced =
-    extractBalancedJsonObject(
-      cleaned
-    );
+    extractBalancedJsonObject(cleaned);
 
   if (balanced) {
     try {
@@ -343,27 +314,21 @@ function extractJSON(
     }
   }
 
-  // Attempt 3: naive outermost-brace slice.
+  /*
+   * Attempt 3:
+   * Sometimes Gemini adds a short explanation before/after
+   * the JSON. Try the outermost object.
+   */
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
 
-  const first =
-    cleaned.indexOf("{");
-
-  const last =
-    cleaned.lastIndexOf("}");
-
-  if (
-    first !== -1 &&
-    last > first
-  ) {
+  if (first !== -1 && last > first) {
     try {
       return JSON.parse(
-        cleaned.slice(
-          first,
-          last + 1
-        )
+        cleaned.slice(first, last + 1)
       );
     } catch {
-      // Fall through to failure.
+      // Continue.
     }
   }
 
@@ -372,36 +337,34 @@ function extractJSON(
   );
 }
 
-/*
- * Safe bounded logging — never dump entire
- * multi-KB code payloads into server logs.
- */
+/* =====================================================
+   LOGGING
+===================================================== */
 
-function safeSnippet(
-  text: string
-): string {
+function safeSnippet(text: string): string {
   const singleLine = text
     .replace(/\s+/g, " ")
     .trim();
 
-  return singleLine.length > 300
-    ? `${singleLine.substring(0, 300)}... [truncated, ${text.length} chars total]`
-    : singleLine;
+  if (singleLine.length > 500) {
+    return `${singleLine.slice(
+      0,
+      500
+    )}... [truncated]`;
+  }
+
+  return singleLine;
 }
 
 /* =====================================================
-   TYPE HELPERS
+   VALIDATION
 ===================================================== */
 
 function isRecord(
   value: unknown
-): value is Record<
-  string,
-  unknown
-> {
+): value is Record<string, unknown> {
   return (
-    typeof value ===
-      "object" &&
+    typeof value === "object" &&
     value !== null
   );
 }
@@ -413,32 +376,56 @@ function isGeneratedCodeResponse(
     return false;
   }
 
-  if (
-    !Array.isArray(
-      value.blocks
-    )
-  ) {
+  if (!Array.isArray(value.blocks)) {
     return false;
   }
 
-  return value.blocks.every(
-    (block) => {
-      if (
-        !isRecord(block)
-      ) {
-        return false;
-      }
+  if (value.blocks.length === 0) {
+    return false;
+  }
 
-      return (
-        typeof block.issueTitle ===
-          "string" &&
-        typeof block.recommendation ===
-          "string" &&
-        typeof block.code ===
-          "string"
-      );
+  return value.blocks.every((block) => {
+    if (!isRecord(block)) {
+      return false;
     }
-  );
+
+    return (
+      typeof block.issueTitle ===
+        "string" &&
+      typeof block.recommendation ===
+        "string" &&
+      typeof block.code ===
+        "string" &&
+      block.code.trim().length > 0
+    );
+  });
+}
+
+/* =====================================================
+   RESPONSE NORMALIZATION
+===================================================== */
+
+function normalizeGeneratedResponse(
+  value: GeneratedCodeResponse
+): GeneratedCodeResponse {
+  return {
+    blocks: value.blocks
+      .filter(
+        (block) =>
+          block.code.trim().length > 0
+      )
+      .map((block) => ({
+        issueTitle:
+          block.issueTitle.trim() ||
+          "Selected Design Implementation",
+
+        recommendation:
+          block.recommendation.trim() ||
+          "Implementation of the selected UX redesign",
+
+        code: block.code.trim(),
+      })),
+  };
 }
 
 /* =====================================================
@@ -457,7 +444,7 @@ export async function POST(
       return Response.json(
         {
           error:
-            "AI code generation is not configured. Add GEMINI_API_KEY to .env.local.",
+            "AI code generation is not configured. Add GEMINI_API_KEY to your environment variables.",
         },
         {
           status: 503,
@@ -469,17 +456,29 @@ export async function POST(
        2. READ BODY
     ================================================= */
 
-    const body =
-      (await request.json()) as GenerateCodeRequest;
+    let body: GenerateCodeRequest;
+
+    try {
+      body =
+        (await request.json()) as GenerateCodeRequest;
+    } catch {
+      return Response.json(
+        {
+          error:
+            "Invalid request body.",
+        },
+        {
+          status: 400,
+        }
+      );
+    }
 
     /* =================================================
        3. VALIDATE ISSUES
     ================================================= */
 
     if (
-      !Array.isArray(
-        body.issues
-      ) ||
+      !Array.isArray(body.issues) ||
       body.issues.length === 0
     ) {
       return Response.json(
@@ -499,8 +498,7 @@ export async function POST(
 
     if (
       !body.technology ||
-      body.technology.trim()
-        .length === 0
+      body.technology.trim().length === 0
     ) {
       return Response.json(
         {
@@ -554,15 +552,8 @@ export async function POST(
     const issuesSummary =
       body.issues
         .map(
-          (
-            issue,
-            index
-          ) =>
-            `${index + 1}. [${
-              issue.severity
-            }] ${
-              issue.title
-            }
+          (issue, index) =>
+            `${index + 1}. [${issue.severity}] ${issue.title}
 
 Category:
 ${issue.category}
@@ -576,9 +567,7 @@ ${issue.evidence}
 Recommendation:
 ${issue.recommendation}`
         )
-        .join(
-          "\n\n"
-        );
+        .join("\n\n");
 
     /* =================================================
        7. RECOMMENDATIONS
@@ -587,42 +576,28 @@ ${issue.recommendation}`
     const recommendationsSummary =
       body.recommendations
         ?.map(
-          (
-            recommendation,
-            index
-          ) =>
-            `${index + 1}. [${
-              recommendation.impact
-            }] ${
-              recommendation.title
-            }
+          (recommendation, index) =>
+            `${index + 1}. [${recommendation.impact}] ${recommendation.title}
 
 Description:
 ${recommendation.description}`
         )
-        .join(
-          "\n\n"
-        ) ||
+        .join("\n\n") ||
       "No additional recommendations.";
 
     /* =================================================
        8. CONTEXT
     ================================================= */
 
-    let contextSummary =
-      "";
+    let contextSummary = "";
 
     if (body.context) {
-      if (
-        body.context.projectName
-      ) {
+      if (body.context.projectName) {
         contextSummary +=
           `Project: ${body.context.projectName}\n`;
       }
 
-      if (
-        body.context.targetAudience
-      ) {
+      if (body.context.targetAudience) {
         contextSummary +=
           `Target Audience: ${body.context.targetAudience}\n`;
       }
@@ -634,9 +609,7 @@ ${recommendation.description}`
           `Product Description: ${body.context.productDescription}\n`;
       }
 
-      if (
-        body.context.uxGoals
-      ) {
+      if (body.context.uxGoals) {
         contextSummary +=
           `UX Goals: ${body.context.uxGoals}\n`;
       }
@@ -721,105 +694,184 @@ ones while preserving the selected design.
 Return ONLY the required JSON response.
 `;
 
+    const fullPrompt =
+      `${SYSTEM_PROMPT}\n\n${userPrompt}`;
+
     /* =================================================
        10. CALL GEMINI
     ================================================= */
 
-    const fullPrompt = `${SYSTEM_PROMPT}
+    let aiContent: string;
 
-${userPrompt}`;
+    try {
+      aiContent =
+        await generateGeminiContent(
+          fullPrompt
+        );
+    } catch (error) {
+      const quotaMessage =
+        formatQuotaError(error);
 
-    const aiContent =
-      await generateGeminiContent(
-        fullPrompt
-      );
+      if (quotaMessage) {
+        return Response.json(
+          {
+            error: quotaMessage,
+          },
+          {
+            status: 429,
+          }
+        );
+      }
+
+      throw error;
+    }
 
     /* =================================================
-       11. PARSE RESPONSE (WITH ONE AUTO-RETRY)
-
-       Gemini occasionally returns malformed or
-       fenced JSON. One automatic regeneration
-       usually fixes it without user action.
+       11. PARSE FIRST RESPONSE
     ================================================= */
 
-    let parsed: unknown;
-
-    let parseFailed = false;
+    let parsed: unknown = null;
 
     try {
       parsed = extractJSON(aiContent);
-    } catch {
-      parseFailed = true;
-    }
-
-    if (!parseFailed && !isGeneratedCodeResponse(parsed)) {
-      parseFailed = true;
-    }
-
-    if (parseFailed) {
+    } catch (parseError) {
       console.error(
-        "[OptiUX] First code-gen response unusable, retrying once. Snippet:",
-        safeSnippet(aiContent)
+        "[OptiUX] Code generation JSON parse failed:",
+        parseError
       );
 
-      const retryContent =
-        await generateGeminiContent(
-          `${fullPrompt}
+      console.error(
+        "[OptiUX] Gemini response snippet:",
+        safeSnippet(aiContent)
+      );
+    }
 
-IMPORTANT: Your previous response could not be parsed.
-Return ONLY the raw JSON object. No Markdown fences,
-no commentary, no text before or after the JSON.`,
-          []
+    /* =================================================
+       12. VALIDATE FIRST RESPONSE
+    ================================================= */
+
+    if (
+      isGeneratedCodeResponse(parsed)
+    ) {
+      const normalized =
+        normalizeGeneratedResponse(
+          parsed
         );
 
-      try {
-        parsed = extractJSON(retryContent);
-
-        if (
-          !isGeneratedCodeResponse(
-            parsed
-          )
-        ) {
-          throw new Error(
-            "Invalid response structure."
-          );
-        }
-      } catch (retryError) {
-        console.error(
-          "[OptiUX] Code-gen retry also failed. Snippet:",
-          safeSnippet(retryContent),
-          retryError
-        );
-
+      if (
+        normalized.blocks.length > 0
+      ) {
         return Response.json(
           {
-            error:
-              "Gemini returned an invalid code generation response after a retry. Please try again in a moment.",
+            blocks:
+              normalized.blocks,
+
+            technology:
+              body.technology,
+
+            selectedDesign:
+              selectedDesign.name,
           },
           {
-            status: 502,
+            status: 200,
           }
         );
       }
     }
 
     /* =================================================
-       12. VALIDATE RESPONSE
+       13. ONE CONTROLLED RETRY
     ================================================= */
 
-    if (
-      !isGeneratedCodeResponse(
-        parsed
-      )
-    ) {
+    console.warn(
+      "[OptiUX] First code-generation response was invalid. Attempting one controlled retry."
+    );
+
+    const retryPrompt = `${fullPrompt}
+
+FINAL RESPONSE REQUIREMENTS:
+
+Return exactly one JSON object.
+
+The response MUST begin with { and end with }.
+
+The response MUST contain:
+
+{
+  "blocks": [
+    {
+      "issueTitle": "Selected Design Implementation",
+      "recommendation": "Implementation of the selected UX redesign",
+      "code": "complete frontend code"
+    }
+  ]
+}
+
+Do not include Markdown.
+
+Do not include code fences.
+
+Do not include explanations.
+
+Do not include text before or after the JSON.
+
+Ensure the JSON is valid before returning it.`;
+
+    let retryContent: string;
+
+    try {
+      retryContent =
+        await generateGeminiContent(
+          retryPrompt
+        );
+    } catch (retryError) {
+      const quotaMessage =
+        formatQuotaError(
+          retryError
+        );
+
+      if (quotaMessage) {
+        return Response.json(
+          {
+            error: quotaMessage,
+          },
+          {
+            status: 429,
+          }
+        );
+      }
+
+      throw retryError;
+    }
+
+    /* =================================================
+       14. PARSE RETRY
+    ================================================= */
+
+    let retryParsed: unknown;
+
+    try {
+      retryParsed =
+        extractJSON(
+          retryContent
+        );
+    } catch (retryParseError) {
       console.error(
-        "[OptiUX] Invalid generated code structure."
+        "[OptiUX] Retry JSON parsing failed:",
+        retryParseError
+      );
+
+      console.error(
+        "[OptiUX] Retry response snippet:",
+        safeSnippet(
+          retryContent
+        )
       );
 
       return Response.json(
         {
           error:
-            "Gemini returned an invalid frontend code structure.",
+            "Gemini returned an invalid code generation response. Please try again.",
         },
         {
           status: 502,
@@ -828,13 +880,64 @@ no commentary, no text before or after the JSON.`,
     }
 
     /* =================================================
-       13. RETURN
+       15. VALIDATE RETRY
+    ================================================= */
+
+    if (
+      !isGeneratedCodeResponse(
+        retryParsed
+      )
+    ) {
+      console.error(
+        "[OptiUX] Retry returned an invalid code-generation structure."
+      );
+
+      console.error(
+        "[OptiUX] Retry response snippet:",
+        safeSnippet(
+          retryContent
+        )
+      );
+
+      return Response.json(
+        {
+          error:
+            "Gemini returned an invalid code generation response. Please try again.",
+        },
+        {
+          status: 502,
+        }
+      );
+    }
+
+    const normalizedRetry =
+      normalizeGeneratedResponse(
+        retryParsed
+      );
+
+    if (
+      normalizedRetry.blocks.length ===
+      0
+    ) {
+      return Response.json(
+        {
+          error:
+            "Gemini did not generate usable frontend code. Please try again.",
+        },
+        {
+          status: 502,
+        }
+      );
+    }
+
+    /* =================================================
+       16. RETURN
     ================================================= */
 
     return Response.json(
       {
         blocks:
-          parsed.blocks,
+          normalizedRetry.blocks,
 
         technology:
           body.technology,
@@ -852,11 +955,9 @@ no commentary, no text before or after the JSON.`,
       error
     );
 
-    /*
-     * Quota / billing problems: return a clear,
-     * actionable message. NEVER forward the raw
-     * Gemini ApiError JSON to the client.
-     */
+    /* =================================================
+       QUOTA / BILLING
+    ================================================= */
 
     const quotaMessage =
       formatQuotaError(error);
@@ -872,6 +973,10 @@ no commentary, no text before or after the JSON.`,
       );
     }
 
+    /* =================================================
+       API KEY
+    ================================================= */
+
     if (
       errorToMessage(error).includes(
         "GEMINI_API_KEY"
@@ -880,13 +985,17 @@ no commentary, no text before or after the JSON.`,
       return Response.json(
         {
           error:
-            "AI code generation is not configured. Add GEMINI_API_KEY to .env.local.",
+            "AI code generation is not configured. Add GEMINI_API_KEY to your environment variables.",
         },
         {
           status: 503,
         }
       );
     }
+
+    /* =================================================
+       GENERIC ERROR
+    ================================================= */
 
     const message =
       error instanceof Error
