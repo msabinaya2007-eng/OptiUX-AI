@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useAnalysis } from "@/lib/analysis-context";
 import type { Severity, UXCategory } from "@/types";
 import {
@@ -78,69 +79,18 @@ export function IssuesList() {
   const { currentSession } = useAnalysis();
   const result = currentSession?.result;
 
+  const router = useRouter();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [filterCategory, setFilterCategory] =
     useState<UXCategory | "all">("all");
   const [filterSeverity, setFilterSeverity] =
     useState<Severity | "all">("all");
-    const [generatingId, setGeneratingId] = useState<string | null>(null);
-const [generatedCode, setGeneratedCode] = useState<{
-  issueTitle: string;
-  recommendation: string;
-  code: string;
-} | null>(null);
 
   if (!result || result.issues.length === 0) return null;
-  const handleFixWithAI = async (issue: (typeof result.issues)[number]) => {
-  try {
-    setGeneratingId(issue.id);
-    setGeneratedCode(null);
 
-    const response = await fetch("/api/generate-code", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        issues: [issue],
-        recommendations: [
-          {
-            title: issue.title,
-            impact:
-              issue.severity === "critical" || issue.severity === "high"
-                ? "High"
-                : issue.severity === "medium"
-                ? "Medium"
-                : "Low",
-            description: issue.recommendation,
-          },
-        ],
-        technology: "React / Next.js / Tailwind CSS",
-      }),
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || "Failed to generate code");
-    }
-
-    if (!data.blocks || data.blocks.length === 0) {
-      throw new Error("AI did not generate any code");
-    }
-
-    setGeneratedCode(data.blocks[0]);
-  } catch (error) {
-    console.error("AI code generation failed:", error);
-    alert(
-      error instanceof Error
-        ? error.message
-        : "Failed to generate improved code"
-    );
-  } finally {
-    setGeneratingId(null);
-  }
-};
+  const handleFixWithAI = () => {
+    router.push("/dashboard/generate-code");
+  };
   const filtered = result.issues.filter((issue) => {
     if (
       filterCategory !== "all" &&
@@ -291,19 +241,15 @@ const [generatedCode, setGeneratedCode] = useState<{
 
                   {/* AI FIX BUTTON */}
                   <button
-  onClick={(e) => {
-    e.stopPropagation();
-    handleFixWithAI(issue);
-  }}
-  disabled={generatingId === issue.id}
-  className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
->
-  <Sparkles className="w-4 h-4" />
-
-  {generatingId === issue.id
-    ? "Generating..."
-    : "Fix with AI"}
-</button>
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleFixWithAI();
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    Fix with AI
+                  </button>
                 </div>
               )}
             </div>

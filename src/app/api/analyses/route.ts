@@ -1,5 +1,8 @@
 import { listAnalyses, deleteAllAnalyses } from "@/lib/analyse/store";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   try {
     const analyses = await listAnalyses(20);

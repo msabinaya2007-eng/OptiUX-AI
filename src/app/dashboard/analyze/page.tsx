@@ -956,7 +956,6 @@ export default function AnalyzePage() {
                     className="relative group rounded-xl border border-border overflow-hidden"
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-
                     <img
                       src={s.preview}
                       alt={`Screenshot ${

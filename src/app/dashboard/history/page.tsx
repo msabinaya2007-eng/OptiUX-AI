@@ -121,26 +121,53 @@ export default function HistoryPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [showSortMenu, setShowSortMenu] = useState(false);
 
-  const fetchAnalyses = useCallback(async () => {
+  const fetchAnalyses = useCallback(() => {
     setLoading(true);
     setError(null);
-    try {
-      const res = await fetch("/api/analyses");
-      if (!res.ok) throw new Error("Failed to load analyses");
-      const data = await res.json();
-      setAnalyses(Array.isArray(data) ? data : []);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load analyses"
-      );
-    } finally {
-      setLoading(false);
-    }
+    fetch("/api/analyses")
+      .then(async (res) => {
+        if (!res.ok) throw new Error("Failed to load analyses");
+        return res.json();
+      })
+      .then((data) => {
+        setAnalyses(Array.isArray(data) ? data : []);
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(
+          err instanceof Error ? err.message : "Failed to load analyses"
+        );
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {
-    fetchAnalyses();
-  }, [fetchAnalyses]);
+    let ignore = false;
+
+    fetch("/api/analyses")
+      .then(async (res) => {
+        if (!res.ok) throw new Error("Failed to load analyses");
+        return res.json();
+      })
+      .then((data) => {
+        if (!ignore) {
+          setAnalyses(Array.isArray(data) ? data : []);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!ignore) {
+          setError(
+            err instanceof Error ? err.message : "Failed to load analyses"
+          );
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, []);
 
   const handleDelete = useCallback(
     async (id: string) => {

@@ -73,19 +73,6 @@ function getInputTypeLabel(type: string) {
   }
 }
 
-function getInputTypeIcon(type: string) {
-  switch (type) {
-    case "url":
-      return Globe;
-    case "screenshots":
-      return ImagePlus;
-    case "video":
-      return Video;
-    default:
-      return Globe;
-  }
-}
-
 async function handlePDFExport(analysis: SavedAnalysis) {
   try {
     const { jsPDF } = await import("jspdf");
@@ -269,26 +256,59 @@ export default function SavedReportPage() {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const fetchAnalysis = useCallback(async () => {
+  const fetchAnalysis = useCallback(() => {
     setLoading(true);
     setError(null);
-    try {
-      const res = await fetch(`/api/analyses/${id}`);
-      if (!res.ok) {
-        if (res.status === 404) throw new Error("Analysis not found");
-        throw new Error("Failed to load analysis");
-      }
-      setAnalysis(await res.json());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load analysis");
-    } finally {
-      setLoading(false);
-    }
+    fetch(`/api/analyses/${id}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          if (res.status === 404) throw new Error("Analysis not found");
+          throw new Error("Failed to load analysis");
+        }
+        return res.json();
+      })
+      .then((data) => {
+        setAnalysis(data);
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(
+          err instanceof Error ? err.message : "Failed to load analysis"
+        );
+        setLoading(false);
+      });
   }, [id]);
 
   useEffect(() => {
-    fetchAnalysis();
-  }, [fetchAnalysis]);
+    let ignore = false;
+
+    fetch(`/api/analyses/${id}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          if (res.status === 404) throw new Error("Analysis not found");
+          throw new Error("Failed to load analysis");
+        }
+        return res.json();
+      })
+      .then((data) => {
+        if (!ignore) {
+          setAnalysis(data);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!ignore) {
+          setError(
+            err instanceof Error ? err.message : "Failed to load analysis"
+          );
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [id]);
 
   const handleDelete = async () => {
     if (!confirm("Delete this analysis? This cannot be undone.")) return;
@@ -382,7 +402,6 @@ export default function SavedReportPage() {
     );
   }
 
-  const TypeIcon = getInputTypeIcon(analysis.inputType);
   const display = analysis.projectName || analysis.url || "Analysis";
 
   return (
@@ -400,7 +419,13 @@ export default function SavedReportPage() {
           <h1 className="text-2xl font-bold">{display}</h1>
           <div className="flex items-center gap-3 mt-1 text-sm text-muted-foreground">
             <span className="inline-flex items-center gap-1">
-              <TypeIcon className="w-3.5 h-3.5" />
+              {analysis.inputType === "screenshots" ? (
+                <ImagePlus className="w-3.5 h-3.5" />
+              ) : analysis.inputType === "video" ? (
+                <Video className="w-3.5 h-3.5" />
+              ) : (
+                <Globe className="w-3.5 h-3.5" />
+              )}
               {getInputTypeLabel(analysis.inputType)}
             </span>
             <span className="inline-flex items-center gap-1">
