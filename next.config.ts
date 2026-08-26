@@ -8,6 +8,12 @@ const nextConfig: NextConfig = {
     "playwright-core",
     "playwright",
   ],
+
+  outputFileTracingIncludes: {
+    "/api/analyze": [
+      "./node_modules/@sparticuz/chromium/bin/**",
+    ],
+  },
 };
 
 export default nextConfig;
