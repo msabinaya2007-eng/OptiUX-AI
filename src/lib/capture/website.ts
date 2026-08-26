@@ -41,28 +41,77 @@ function normalizeUrl(url: string): string {
   }
 }
 
+type BrowserInstance = Awaited<
+  ReturnType<typeof import("playwright-core").chromium.launch>
+>;
+
+async function launchBrowser(): Promise<BrowserInstance> {
+  const isServerless = Boolean(
+    process.env.VERCEL ||
+    process.env.AWS_LAMBDA_FUNCTION_NAME ||
+    process.env.AWS_EXECUTION_ENV ||
+    (process.env.NODE_ENV === "production" && process.platform === "linux")
+  );
+
+  if (isServerless) {
+    console.log(
+      "[OptiUX] Launching serverless Chromium via @sparticuz/chromium..."
+    );
+    const chromiumModule = await import("@sparticuz/chromium");
+    const chromium = chromiumModule.default || chromiumModule;
+    const { chromium: playwrightChromium } = await import("playwright-core");
+
+    chromium.setGraphicsMode = false;
+    const executablePath = await chromium.executablePath();
+
+    return await playwrightChromium.launch({
+      args: [
+        ...chromium.args,
+        "--hide-scrollbars",
+        "--disable-web-security",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+      ],
+      executablePath,
+      headless: true,
+    });
+  }
+
+  console.log("[OptiUX] Launching local browser for capture...");
+  try {
+    const { chromium: playwrightChromium } = await import("playwright");
+    return await playwrightChromium.launch({
+      headless: true,
+    });
+  } catch (localError) {
+    console.warn(
+      "[OptiUX] Local Playwright launch fallback to playwright-core:",
+      localError
+    );
+    const { chromium: playwrightCoreChromium } = await import(
+      "playwright-core"
+    );
+    return await playwrightCoreChromium.launch({
+      headless: true,
+      channel: "chrome",
+    });
+  }
+}
+
 export async function captureWebsite(
   url: string
 ): Promise<WebsiteCaptureResult> {
   const normalizedUrl = normalizeUrl(url);
 
-  let browser: Awaited<
-    ReturnType<
-      typeof import("playwright").chromium.launch
-    >
-  > | null = null;
+  let browser: BrowserInstance | null = null;
 
   try {
     console.log(
       `[OptiUX] Opening website: ${normalizedUrl}`
     );
 
-    // Load Playwright only when URL capture is actually needed.
-    const { chromium } = await import("playwright");
-
-    browser = await chromium.launch({
-      headless: true,
-    });
+    browser = await launchBrowser();
 
     const context = await browser.newContext({
       viewport: {
